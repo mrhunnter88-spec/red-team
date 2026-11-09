@@ -1,1 +1,92 @@
 
+
+📂 Common Insecure Data Storage Targets
+
+When an Android application runs, it primarily stores data inside its private sandboxed directory located at /data/data/[package_name]/. Security audits usually target four major areas:
+1. shared_prefs/: XML files containing simple key-value pairs (often stores cleartext session tokens).
+2. databases/: SQLite database files (.db or .sqlite) storing structured offline user records.
+3. cache/: Temporary files or cached network responses that might contain user information.
+4. External Storage (/sdcard/ or /storage/emulated/0/): Publicly accessible directories where data is saved without isolation, allowing any app with storage permissions to read it.
+
+🛠️ Step-by-Step Reversing Methodology
+
+
+Step 1: Scan Source Code for File Creation APIs
+
+Before running the application, you can use JADX-GUI or Apktool to spot exactly where and how the app creates local files. Open the decompiled code and search for these specific Android storage APIs:
+• getSharedPreferences(...)
+• openFileOutput(...)
+• SQLiteOpenHelper
+• getExternalFilesDir(...)
+
+Step 2: Look for Insecure File Permissions
+
+In older apps or flawed code, developers sometimes explicitly set global read/write flags. Keep an eye out for these deprecated constants in the code:
+• MODE_WORLD_READABLE (Allows any app on the device to read this file).
+• MODE_WORLD_WRITEABLE (Allows any app to modify this file).
+
+Step 3: Inspect the Device Runtime Environment
+
+To see what the app is actually storing, run it on an Android Emulator (like Genymotion or Android Studio) and interact with it (e.g., log in, fill out a form). Open a terminal and use the Android Debug Bridge (ADB) to inspect its sandbox:
+bash
+adb shell
+su
+cd /data/data/com.example.vulnerableapp/
+ls -la shared_prefs/
+cat shared_prefs/UserSession.xml
+Use code with caution.
+
+🐍 Automation & Vulnerability Scanning with Python
+
+You can use Python to scan both the static source code (for storage APIs and hardcoded paths) and the live device storage via ADB.
+The script below performs a static analysis scan on a decompiled APK directory to instantly flag where insecure storage mechanisms are implemented.
+python
+import os
+import re
+
+def scan_insecure_storage(decompiled_dir):
+    """Scans decompiled Java/Smali source files for insecure data storage patterns."""
+    print(f"[*] Starting static storage audit on: {decompiled_dir}\n")
+
+    # Target vulnerabilities and their regex patterns
+    patterns = {
+        "World Readable File Permission": r"MODE_WORLD_READABLE",
+        "World Writeable File Permission": r"MODE_WORLD_WRITEABLE",
+        "SharedPreferences Usage": r"getSharedPreferences\(",
+        "Raw SQLite Database Initialization": r"openOrCreateDatabase\(",
+        "External Storage Access (Public Area)": r"getExternalStorageDirectory|getExternalFilesDir",
+        "Hardcoded Local File Path / SD Card": r"[\"']/sdcard/|[\"']/storage/emulated/"
+    }
+
+    vulnerabilities_found = 0
+
+    # Walk through the decompiled directory
+    for root, _, files in os.walk(decompiled_dir):
+        for file in files:
+            if file.endswith((".java", ".smali", ".xml")):
+                file_path = os.path.join(root, file)
+                
+                try:
+                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read()
+                        
+                        for vuln_name, regex in patterns.items():
+                            matches = re.findall(regex, content)
+                            if matches:
+                                vulnerabilities_found += len(matches)
+                                print(f"[!] Found {len(matches)} instance(s) of [{vuln_name}]")
+                                print(f"    File: {os.path.relpath(file_path, decompiled_dir)}")
+                                print("-" * 60)
+                except Exception as e:
+                    print(f"[-] Error reading file {file}: {e}")
+
+    print(f"\n[+] Audit finished. Total structural storage indicators flagged: {vulnerabilities_found}")
+
+if __name__ == "__main__":
+    # Path to the directory created by apktool or JADX source export
+    DECOMPILE_DIR = "decompiled_source" 
+    
+    if os.path.exists(DECOMPILE_DIR):
+        scan_insecure_storage(DECOMPILE_DIR)
+    else:
+        print(f"[-] Directory '{DECOMPILE_DIR}' not found. Please provide a valid decompiled source directory.")
