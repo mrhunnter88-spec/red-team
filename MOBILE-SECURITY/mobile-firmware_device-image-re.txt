@@ -1,1 +1,93 @@
 
+Analyzing Mobile Firmware and Device Images shifts the scope from application-level reverse engineering (APKs) to auditing the full operating system environment. Firmware reverse engineering involves breaking down ROM files, OTA updates, boot images (boot.img), or system partition images (system.img) to find vulnerabilities in the kernel, custom device drivers, low-level initialization scripts, or pre-installed system apps.
+
+📂 Structural Breakdown of a Device Partition Image
+
+When you unpack a mobile device firmware zip file (such as a factory image or custom ROM update), you will encounter specific binary image formats:
+• boot.img: Contains the Linux Kernel and the ramdisk (the initial filesystem launched during the device boot process).
+• system.img / vendor.img: Large filesystem blocks (typically Android sparse images or raw ext4 partitions) containing all pre-installed system binaries, framework components, and hardware-specific HAL drivers (.so native files).
+• vbmeta.img: Holds cryptographic signatures and hashes used by Android Verified Boot (AVB) to ensure partition integrity.
+
+🛠️ Step-by-Step Firmware Reversing Methodology
+
+
+Step 1: Converting Sparse Android Images to Raw Images
+
+Most modern mobile operating system partitions are packaged as compressed "sparse" images to save download space. Traditional mounting tools cannot read them directly. You must first expand them to a raw ext4 filesystem using the simg2img utility:
+bash
+simg2img system.img system_raw.img
+Use code with caution.
+
+Step 2: Unpacking the Root Filesystem
+
+Once you have the raw disk image, create a directory and mount the filesystem to look through its files:
+bash
+mkdir mounted_system
+sudo mount -o loop system_raw.img mounted_system/
+Use code with caution.
+You can now navigate the full OS file system structure, inspect system configuration files, or copy custom compiled services out for further native binary analysis.
+
+Step 3: Extracting the Boot Ramdisk
+
+To view low-level boot initialization scripts (like init.rc) that manage kernel-level properties, extract the boot.img file using specialized tools like magiskboot or abootimg.
+
+🐍 Automation & Firmware Anomaly Harvesting with Python
+
+The following Python script automates firmware static auditing over a mounted or unpacked device partition directory. It automatically targets root-level initialization files (.rc), property maps (build.prop), and shell scripts, scanning them for critical misconfigurations like permissive SELinux states, insecure debugging properties, or hardcoded production backdoors.
+python
+import os
+import re
+
+def audit_firmware_image(mounted_dir):
+    """Scans mounted firmware filesystem targets for kernel, init, and security misconfigurations."""
+    print(f"[*] Starting low-level security audit on firmware directory: {mounted_dir}\n")
+
+    # Regular expressions targeting standard insecure OS-level properties and backdoors
+    firmware_risk_patterns = {
+        "Disabled SELinux Protection State": r"androidboot\.selinux=permissive",
+        "Insecure ADB Root Debugging Enabled": r"ro\.debuggable\s*=\s*1|ro\.secure\s*=\s*0",
+        "Exposed Raw Hardware Device Permissions": r"chmod\s+0777\s+/dev/[a-zA-Z0-9_-]+",
+        "Hardcoded Secret / Password / Private Key": r'(?i)(password|private_key|ssh_key)\s*=\s*["\']?[A-Za-z0-9+/=]{16,}["\']?',
+        "Potential Firmware Backdoor Indicator": r'nc\s+-e|bash\s+-i|/dev/tcp/'
+    }
+
+    vulnerabilities_uncovered = 0
+
+    # Crawl configuration files, property sheets, init scripts, and shell code
+    target_extensions = (".rc", ".prop", ".sh", ".conf", ".txt")
+    
+    for root, _, files in os.walk(mounted_dir):
+        for file in files:
+            if file.endswith(target_extensions) or file in ["build.prop", "init.rc"]:
+                file_path = os.path.join(root, file)
+                
+                try:
+                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                        lines = f.readlines()
+                        
+                        for line_num, line in enumerate(lines, 1):
+                            # Skip comments to avoid false positives
+                            if line.strip().startswith("#"):
+                                continue
+                                
+                            for vulnerability, regex in firmware_risk_patterns.items():
+                                if re.search(regex, line):
+                                    vulnerabilities_uncovered += 1
+                                    print(f"[!] OS Configuration Flaw: {vulnerability}")
+                                    print(f"    File:  {os.path.relpath(file_path, mounted_dir)} (Line {line_num})")
+                                    print(f"    Match: {line.strip()}")
+                                    print("-" * 70)
+                except Exception:
+                    continue
+
+    print(f"[+] Firmware assessment finalized. Total OS-level risks uncovered: {vulnerabilities_uncovered}")
+
+if __name__ == "__main__":
+    # Point this to your mounted or extracted system/vendor/boot directory structure
+    FIRMWARE_DIR = "mounted_system"
+    
+    if os.path.exists(FIRMWARE_DIR):
+        audit_firmware_image(FIRMWARE_DIR)
+    else:
+        print(f"[-] Directory '{FIRMWARE_DIR}' not detected. Ensure your device image is correctly extracted or mounted.")
+Use code with caution.
