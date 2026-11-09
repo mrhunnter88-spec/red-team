@@ -1,1 +1,90 @@
+When executing memory corruption attacks on modern systems, security mitigations like NX/DEP (No-Execute / Data Execution Prevention) prevent the execution of custom shellcode injected onto the stack or heap. To bypass this, attackers repurpose existing code already mapped into memory.
+The three primary techniques for code reuse attacks are ROP (Return-Oriented Programming), Ret2libc (Return-to-libc), and JOP (Jump-Oriented Programming).
+
+Direct Overview & Structural Comparison
+
+
+Feature	Ret2libc	ROP (Return-Oriented)	JOP (Jump-Oriented)
+Primary Target	Complete functions inside dynamic libraries (e.g., system()).	Short fragments of instruction blocks ("gadgets") ending in ret.	Short instruction fragments ending in an indirect jump (e.g., jmp eax).
+Control Flow Register	Modifies Instruction Pointer via standard returns.	Relies entirely on the stack pointer (ESP/RSP) to advance execution.	Uses an arbitrary data register (EAX, EBX, etc.) as a dispatch table.
+Stack Reliance	High. Arguments must be aligned properly on the stack.	High. Each ret pops the next gadget off the stack.	None. The stack pointer is ignored; execution flows via pointer tables.
+Complexity	Low (Simplest code reuse method).	Medium (Requires stitching small assembly parts).	High (Requires a dedicated dispatcher gadget to act as a CPU loop).
+
+
+1. Ret2libc (Return-to-libc)
+
+This is the foundational entry point of code-reuse exploitation. Instead of generating complex instruction lines, you overwrite the return address to point directly to the entry point of a complete, legitimate library function—typically system() inside libc.
+
+Execution Flow & Memory Layout
+
+When a function executes a return instruction, it expects the stack to contain a valid function return pointer followed by arguments. We map the stack to trick system() into executing our string parameter:
+text
+       Top of Stack (Lower Memory Address)
+       +------------------------------------+
+
+       |  Address of system()               | <-- Overwritten Return Address [1, 2]
+       +------------------------------------+
+
+       |  Exit / Fake Return Address        | <-- Dummy 4 bytes (Where system goes when done)
+       +------------------------------------+
+
+       |  Pointer to "/bin/sh" string       | <-- First argument passed to system() [1]
+       +------------------------------------+
+       Bottom of Stack (Higher Memory Address)
+Use code with caution.
+
+2. ROP (Return-Oriented Programming)
+
+When compilers drop arguments into registers instead of the stack (such as 64-bit architectures), a pure Ret2libc attack fails. You must use ROP. ROP pieces together tiny fragments of existing executable memory called gadgets. Each gadget executes 1–3 instructions and concludes with a ret.
+The ret instruction pops the next memory pointer off the stack directly into the Instruction Pointer (RIP), allowing you to cascade instructions sequentially.
+
+Python ROP Automation (rop.py)
+
+Using pwntools, we can look up gadgets and construct a payload to set up the register requirements (rdi = "/bin/sh") for a 64-bit shell execution.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+elf = ELF('./vulnerable_binary')
+libc = ELF('/lib/x86_64-linux-gnu/libc.so.6')
+io = process('./vulnerable_binary')
+
+# 1. Look up gadgets inside the dynamic library architecture
+# We need to load the address of "/bin/sh" into the RDI register
+rop = ROP(libc)
+pop_rdi = rop.find_gadget(['pop rdi', 'ret'])[0]
+system_addr = libc.symbols['system']
+bin_sh_addr = next(libc.search(b'/bin/sh'))
+
+# 2. Build the chained memory structure
+offset = 40
+payload = b"A" * offset
+payload += p64(pop_rdi)       # Land on gadget: pops next stack element to RDI
+payload += p64(bin_sh_addr)   # This address gets loaded directly into RDI
+payload += p64(system_addr)   # system() runs, consuming RDI as its parameter
+
+io.sendline(payload)
+io.interactive()
+Use code with caution.
+
+3. JOP (Jump-Oriented Programming)
+
+As security toolchains adapted to look for abusive ret patterns, researchers introduced JOP. JOP completely avoids the ret instruction. Instead, it links gadgets together using indirect jumps or calls (e.g., jmp eax or call ebx).
+Because there are no ret instructions, the Stack Pointer (RSP) is never touched during execution. Instead, JOP relies on a Dispatcher Gadget to act as a virtual program counter.
+
+The JOP Lifecycle
+
+1. An attacker sets up a Dispatch Table in memory (e.g., a list of data pointers inside a heap allocation block).
+2. A register (like EBX) is assigned to point to this table.
+3. The Dispatcher Gadget advances the index register and jumps to the next gadget slot:assembly
+add ebx, 4
+jmp dword ptr [ebx]
+Use code with caution.
+4. Each executing structural gadget performs its data task (like setting up arguments) and must conclude by jumping straight back to the Dispatcher Gadget to fetch the next step.
+
+Modern Defenses and Architectural Mitigations
+
+As code-reuse vectors expanded, compilation frameworks implemented hardware and software controls:
+• Shadow Stacks (Intel CET / AMD Shadow Stack): Tracks return operations via a secondary, hardware-isolated stack memory page that cannot be accessed by normal application pointers. When a ret instruction triggers, the CPU verifies that the address on the user stack matches the address stored on the hardware shadow stack. If a mismatch is detected (as in standard Ret2libc or ROP attacks), the system terminates the process instantly.
+• Forward-Edge CFI (Control-Flow Integrity / FineIBT): Protects indirect call and jump pathways (neutralizing JOP). CFI enforces that runtime indirect branches (jmp rax) can only land exclusively on pre-compiled landing pads or dynamically verified function signatures.
 
