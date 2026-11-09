@@ -1,1 +1,87 @@
+Analyzing an Android application for Insecure Cryptography focuses on finding cryptographic implementations that fail to protect data because they use weak algorithms, broken protocols, or bad key management practices. Developers often make the mistake of using outdated ciphers, static hardcoded keys, or trivial encryption modes that are easily broken during a security review.
+Here is a step-by-step example and an automated Python script to identify cryptographic flaws in an Android APK.
 
+📂 Common Cryptographic Vulnerabilities in Android
+
+When auditing an APK's code base, security analysts primarily look for four fatal cryptographic errors:
+1. Weak/Broken Algorithms: Using deprecated hash functions or ciphers like MD5, SHA-1, DES, or 3DES which are highly vulnerable to collisions and brute-force attacks.
+2. Hardcoded Encryption Keys/Salts: Storing cryptographic keys or initialization vectors (IVs) as plaintext string literals directly within the Java/Smali source code.
+3. Insecure Cipher Modes: Using AES with ECB (Electronic Codebook) mode. ECB does not use an IV, meaning identical plaintext blocks encrypt into identical ciphertext blocks, leaking structural patterns.
+4. Predictable Randomness: Utilizing standard java.util.Random instead of a cryptographically secure pseudo-random number generator (SecureRandom) for generating keys or tokens.
+
+🛠️ Step-by-Step Reversing Methodology
+
+
+Step 1: Pinpoint the Crypto Architectures
+
+Open the APK using JADX-GUI or unpack it with Apktool. Navigate to the codebase search tool and look for Java's native cryptographic entry point: Cipher.getInstance(.
+
+Step 2: Evaluate the Transformation String
+
+When a developer sets up a cipher, they pass a transformation configuration string structured as "Algorithm/Mode/Padding". Look closely at what is inside:
+• Vulnerable: Cipher.getInstance("AES/ECB/PKCS5Padding") → Flag this immediately due to ECB mode usage.
+• Secure Alternative: Cipher.getInstance("AES/GCM/NoPadding") → Standard industry practice utilizing authenticated encryption.
+
+Step 3: Hunt for Static Byte Arrays and Keys
+
+Search the classes for variable definitions that look like cryptographic constants. For example:
+java
+private static final String CRYPTO_KEY = "MySuP3rS3cr3tK3y!";
+byte[] salt = {0, 1, 2, 3, 4, 5, 6, 7};
+Use code with caution.
+If a key is found inside the code, anyone who decompiles the APK can decrypt all localized or matching network traffic data.
+
+🐍 Automation & Vulnerability Scanning with Python
+
+The following Python script automates static analysis over a decompiled source code directory. It relies on refined regular expressions to instantly surface weak algorithms, insecure cipher block modes, insecure random number generators, and candidate hardcoded keys.
+python
+import os
+import re
+
+def audit_cryptography(decompiled_dir):
+    """Scans decompiled Android code files for cryptographic weaknesses and hardcoded keys."""
+    print(f"[*] Initiating cryptographic static security audit on: {decompiled_dir}\n")
+
+    # Regular expressions targeting standard insecure crypto implementations
+    crypto_patterns = {
+        "Weak Hash Function (MD5/SHA-1)": r'MessageDigest\.getInstance\(\s*["\'](MD5|SHA-1|SHA1)["\']\s*\)',
+        "Weak Symmetric Cipher (DES/3DES)": r'Cipher\.getInstance\(\s*["\'](DES|DESede)["\']\s*\)',
+        "Insecure AES-ECB Block Mode": r'Cipher\.getInstance\(\s*["\']AES/ECB/[^"\']*["\']\s*\)',
+        "Predictable Random Number Generator": r'new\s+Random\(\)',
+        "Candidate Hardcoded AES Key / Secret Variable": r'(?i)(secret|crypto_key|aes_key|private_key|token)\s*=\s*["\'][A-Za-z0-9+/=]{8,}["\']'
+    }
+
+    issues_discovered = 0
+
+    # Crawl the directory containing Java, Smali, or XML files
+    for root, _, files in os.walk(decompiled_dir):
+        for file in files:
+            if file.endswith((".java", ".smali")):
+                file_path = os.path.join(root, file)
+                
+                try:
+                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                        lines = f.readlines()
+                        
+                        for line_num, line in enumerate(lines, 1):
+                            for vulnerability, regex in crypto_patterns.items():
+                                match = re.search(regex, line)
+                                if match:
+                                    issues_discovered += 1
+                                    print(f"[!] {vulnerability} Detected!")
+                                    print(f"    File:   {os.path.relpath(file_path, decompiled_dir)} (Line {line_num})")
+                                    print(f"    Match:  {line.strip()}")
+                                    print("-" * 70)
+                except Exception as e:
+                    print(f"[-] Unable to parse file {file}: {e}")
+
+    print(f"\n[+] Cryptographic assessment complete. Total risks found: {issues_discovered}")
+
+if __name__ == "__main__":
+    # Point this to your target folder containing decompiled source code
+    DECOMPILE_DIR = "decompiled_source" 
+    
+    if os.path.exists(DECOMPILE_DIR):
+        audit_cryptography(DECOMPILE_DIR)
+    else:
+        print(f"[-] Directory '{DECOMPILE_DIR}' not found. Please provide a valid decompiled source folder.")
