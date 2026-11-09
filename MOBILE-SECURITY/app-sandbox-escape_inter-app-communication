@@ -1,1 +1,116 @@
+Analyzing an Android application for Sandbox Escapes and Inter-App Communication (IAC) vulnerabilities focuses on exploiting the mechanisms Android apps use to talk to each other. By default, Android places every application in a strict security sandbox. However, developers often configure custom Intents, Content Providers, and Broadcast Receivers to share features or handle deep links.
+If these entry points are unprotected, an attacker can trick a vulnerable application into exposing private files, reading confidential application data, or executing unauthorized actions—effectively bypassing the sandbox.
+
+📂 Common Sandbox & Inter-App Communication Flaws
+
+When auditing an APK for architectural leakage, you look for three critical entry points:
+1. Intent Spoofing / Unauthorized Component Access: When an activity or service is marked android:exported="true", any rogue app installed on the same device can send it an explicit Intent. If that component handles sensitive tasks without validation, an attacker can force arbitrary state changes.
+2. File Provider Directory Traversal (Sandbox Leaks): Content Providers are used to securely share structured data or files across boundaries. However, if a FileProvider is configured incorrectly with a root path mapping (path="."), an external app can use directory traversal tricks (../../) to read files from the vulnerable app's private /data/data/ folder.
+3. Broadcast Hijacking: Apps use Broadcast Receivers to listen for system-wide signals or custom notifications. If an app registers a global receiver for sensitive operations and doesn't restrict it with a specific permission tag, external applications can spoof those broadcasts.
+
+🛠️ Step-by-Step Reversing Methodology
+
+
+Step 1: Analyze Content Providers in the Manifest
+
+Decompile the target APK using JADX-GUI or unpack it with Apktool. Open AndroidManifest.xml and inspect the <provider> tags. Look for exposed data paths:
+xml
+<provider 
+    android:name=".FileSharingProvider" 
+    android:authorities="com.example.vulnerable.fileprovider" 
+    android:exported="true" 
+    android:grantUriPermissions="true" />
+Use code with caution.
+If android:exported="true" is set, look for the underlying configuration file (usually in res/xml/provider_paths.xml) to see what paths are shared.
+
+Step 2: Spot the Directory Traversal configuration Error
+
+Inside provider_paths.xml, look at the path definitions:
+xml
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Vulnerable: Maps the entire root directory! -->
+    <root-path name="root_leaked" path="." />
+</paths>
+Use code with caution.
+Because the root-path alias targets the root directory ., a malicious app can query content://com.example.vulnerable.fileprovider/root_leaked/data/data/com.example.vulnerable/shared_prefs/UserSession.xml and completely bypass the app's internal sandbox.
+
+🐍 Automation & Inter-App Security Scanning with Python
+
+The following Python script automates static checking over a decompiled package. It scans the AndroidManifest.xml structure for exposed Inter-App Communication constructs, analyzes risk tags, and searches for misconfigured FileProvider structural definitions.
+python
+import os
+import xml.etree.ElementTree as ET
+
+def audit_sandbox_and_iac(decompile_dir):
+    """Parses AndroidManifest.xml and provider configurations for sandbox isolation leaks."""
+    print(f"[*] Starting sandbox escape and IAC isolation audit inside: {decompile_dir}\n")
+    
+    manifest_path = os.path.join(decompile_dir, "AndroidManifest.xml")
+    if not os.path.exists(manifest_path):
+        print("[-] Error: AndroidManifest.xml not detected.")
+        return
+
+    try:
+        ET.register_namespace('android', 'http://android.com')
+        tree = ET.parse(manifest_path)
+        root = tree.getroot()
+        package_name = root.attrib.get('package', 'TargetApp')
+
+        # 1. Inspect Content Providers for cross-app leakage flags
+        for provider in root.findall('.//provider'):
+            p_name = provider.attrib.get('{http://android.com}name')
+            p_auth = provider.attrib.get('{http://android.com}authorities')
+            p_exported = provider.attrib.get('{http://android.com}exported')
+            
+            if p_exported == "true":
+                print(f"[!] Exposure Risk: Exported Content Provider Found!")
+                print(f"    Component Name: {p_name}")
+                print(f"    Authority Base: content://{p_auth}/")
+                print(f"    Vector: Any local app can attempt queries against this URI scheme.")
+                print("-" * 70)
+
+        # 2. Inspect Broadcast Receivers for unprotected global broadcast endpoints
+        for receiver in root.findall('.//receiver'):
+            r_name = receiver.attrib.get('{http://android.com}name')
+            r_exported = receiver.attrib.get('{http://android.com}exported')
+            r_permission = receiver.attrib.get('{http://android.com}permission')
+            
+            has_filter = receiver.find('intent-filter') is not None
+            
+            if r_exported == "true" or (r_exported is None and has_filter):
+                if not r_permission:
+                    print(f"[!] Exposure Risk: Unprotected Broadcast Receiver Detected!")
+                    print(f"    Component Name: {r_name}")
+                    print(f"    Vector: Rogue apps can spoof broadcast Intents to hijack app events.")
+                    print("-" * 70)
+
+    except Exception as e:
+        print(f"[-] Operational error parsing manifest: {e}")
+
+    # 3. Check for structural FileProvider leaks in resource XML directory
+    xml_dir = os.path.join(decompile_dir, "res", "xml")
+    if os.path.exists(xml_dir):
+        for file in os.listdir(xml_dir):
+            if file.endswith(".xml"):
+                file_path = os.path.join(xml_dir, file)
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        xml_content = f.read()
+                        if "root-path" in xml_content or 'path="."' in xml_content:
+                            print(f"[!] Vulnerability Found: Loose File Provider Path Mapping!")
+                            print(f"    Configuration File: res/xml/{file}")
+                            print(f"    Details: root-path or universal dot ('.') allows cross-sandbox traversal.")
+                            print("-" * 70)
+                except Exception:
+                    continue
+
+if __name__ == "__main__":
+    DECOMPILE_DIR = "decompiled_source"
+    
+    if os.path.exists(DECOMPILE_DIR):
+        audit_sandbox_and_iac(DECOMPILE_DIR)
+    else:
+        print(f"[-] Directory '{DECOMPILE_DIR}' not found. Please provide a valid decompiled source directory.")
+Use code with caution.
 
