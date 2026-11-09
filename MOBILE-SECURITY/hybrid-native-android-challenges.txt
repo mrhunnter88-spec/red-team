@@ -1,1 +1,115 @@
 
+Analyzing Hybrid-Native Android Challenges focuses on auditing applications built using hybrid cross-platform frameworks rather than pure Java or Kotlin. Frameworks like Flutter, React Native, Cordova, Capacitor, or Maui wrap the core app logic inside web views, compiled JavaScript bundles, or custom binary blobs.
+When reverse engineering these apps, traditional tools like JADX-GUI or Apktool will only show the native boilerplate skeleton wrapper. To find vulnerabilities like hardcoded secrets, insecure endpoints, or logical flaws, you must extract and decompile the underlying asset frameworks.
+
+📂 Structural Blueprint of Hybrid Frameworks
+
+The core app logic is stored in completely different locations depending on the framework used:
+
+Framework	Primary Asset Path	Logic Representation	Key Reversing Tool
+React Native	assets/index.android.bundle	Minified/Optimized JavaScript	jsexact / prettier
+Flutter	lib/[arch]/libapp.so	Ahead-Of-Time (AOT) Compiled AArch64 Assembly	Ghidra / Dart Extractor
+Cordova / PhoneGap	assets/www/	Cleartext HTML, CSS, and JS files	Standard Text Editor
+
+
+🛠️ Step-by-Step Reversing Methodology
+
+
+Step 1: Detect the Framework Type
+
+Unpack the APK file using Apktool. Look at the structural footprint inside the asset files to instantly identify which framework you are targeting.
+
+Step 2: Unpacking and De-obfuscating React Native
+
+If the asset folder contains index.android.bundle, the app runs on React Native. This file is a highly compressed single-line JavaScript block. You can extract it and format it into readable code using node utilities:
+bash
+# Install global JavaScript formatting tools
+npm install -g prettier
+# Format the minified bundle to read the original component states
+prettier --write decompiled_source/assets/index.android.bundle
+Use code with caution.
+
+Step 3: Extracting Secrets from Flutter Binaries
+
+Flutter doesn't use JavaScript; it compiles Dart code straight into native machine code (libapp.so). Traditional string commands often fail because strings are packed into specialized tables. You can use specialized tools or Python scripts to parse the memory layouts of the shared library to extract backend APIs.
+
+🐍 Automation & Hybrid Asset Harvesting with Python
+
+The following Python script scans a decompiled application directory, automatically identifies which hybrid framework was used to build the app, and extracts embedded configuration URLs, hidden access tokens, or endpoints directly out of framework asset bundles.
+python
+import os
+import re
+
+def audit_hybrid_framework_assets(decompile_dir):
+    """Detects hybrid mobile architectures and harvests indicators out of embedded bundle files."""
+    print(f"[*] Analyzing structural asset frameworks inside: {decompile_dir}\n")
+
+    # Signatures to detect the underlying cross-platform engine
+    framework_fingerprints = {
+        "React Native Bundle": os.path.join(decompile_dir, "assets", "index.android.bundle"),
+        "Cordova/Capacitor WebRoot": os.path.join(decompile_dir, "assets", "www", "index.html"),
+        "Flutter Binary Engine": os.path.join(decompile_dir, "lib", "arm64-v8a", "libapp.so")
+    }
+
+    detected_frameworks = []
+    for name, path in framework_fingerprints.items():
+        if os.path.exists(path):
+            detected_frameworks.append((name, path))
+            print(f"[+] Engine Detected: App relies on the {name} baseline architecture.")
+
+    if not detected_frameworks:
+        print("[-] Notice: Standard native architecture or unrecognizable asset wrappers detected.")
+        print("-" * 70)
+        return
+
+    print("-" * 70)
+    print("[*] Harvesting configuration strings and keys from hybrid asset layers...")
+
+    # Focus scanning engine on raw bundle formats
+    regex_patterns = {
+        "API Endpoint / Target Cloud Host": r'https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:/[^\s"\']*)?',
+        "Hardcoded Auth / Firebase Token Signature": r'(?i)(api_key|token|jwt|auth_secret)["\']?\s*[:=]\s*["\']([A-Za-z0-9-_=+\./]{12,})["\']'
+    }
+
+    # Extract indicators from all files inside asset or lib folders
+    targets = [os.path.join(decompile_dir, "assets"), os.path.join(decompile_dir, "lib")]
+    harvested_count = 0
+
+    for target_path in targets:
+        if not os.path.exists(target_path):
+            continue
+            
+        for root, _, files in os.walk(target_path):
+            for file in files:
+                # Target primary compiled or text-wrapped asset bundles
+                if file.endswith((".bundle", ".js", ".html", ".json", ".so")):
+                    file_path = os.path.join(root, file)
+                    try:
+                        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                            # Read chunked sizes if dealing with heavy binary libraries like libapp.so
+                            content = f.read(10 * 1024 * 1024) # Scan first 10MB
+                            
+                            for label, regex in regex_patterns.items():
+                                matches = re.findall(regex, content)
+                                if matches:
+                                    # Deduplicate and truncate outputs for clean visualization
+                                    unique_matches = list(set(matches))[:5]
+                                    harvested_count += len(unique_matches)
+                                    print(f"\n[!] Discovered Indicator: {label}")
+                                    print(f"    Source File: {os.path.relpath(file_path, decompile_dir)}")
+                                    for match in unique_matches:
+                                        print(f"    -> Sample Match: {match}")
+                    except Exception:
+                        continue
+
+    print(f"\n[+] Hybrid asset analysis concluded. Total security parameters extracted: {harvested_count}")
+
+if __name__ == "__main__":
+    # Path to the directory created via your initial apktool unpacking routine
+    DECOMPILE_DIR = "decompiled_source"
+    
+    if os.path.exists(DECOMPILE_DIR):
+        audit_hybrid_framework_assets(DECOMPILE_DIR)
+    else:
+        print(f"[-] Directory '{DECOMPILE_DIR}' not found. Please target a valid decompiled application setup.")
+Use code with caution.
