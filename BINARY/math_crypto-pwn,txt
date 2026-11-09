@@ -1,1 +1,138 @@
+Math / Crypto PWN challenges sit at the intersection of algorithmic vulnerability and protocol exploitation. In these scenarios, the binary’s memory management is flawless (full ASLR, NX, Stack Canaries, and completely safe C/C++ string functions), but the application introduces flaws in mathematical implementation or cryptographic key reuse.
+A classic archetype of this is an RSA Private Key Reconstruct Primitive via Fault Injection or Common Factor exploitation. When a network daemon uses custom math extensions or poorly handles mathematical states, an attacker can use numerical analysis to calculate secret keys, forge signatures, and unlock administrative execution loops remotely.
+
+1. The Core Algorithmic Trap: GCD and Factor Reuse
+
+The security of RSA relies on the difficulty of factoring a massive integer composite \(N\), which is the product of two secret prime numbers (\(N = p \times q\)).
+If a server generates cryptographic key pairs dynamically but relies on a flawed Pseudo-Random Number Generator (PRNG) or uninitialized entropy states, two entirely different server nodes might happen to share one of their secret prime numbers (\(p\)).
+While factoring a single \(N_{1}\) is computationally impossible, if you can access a second public key modulus \(N_{2}\) that shares a prime factor with \(N_{1}\), the entire security model collapses instantly via the Greatest Common Divisor (GCD) algorithm:
+\(\text{gcd}(N_{1},N_{2})=p\)
+Once the shared prime \(p\) is extracted via simple Euclidean division, calculating \(q\), the private exponent \(d\), and forging admin tokens becomes an instantaneous mathematical operation.
+
+2. The Cryptographic Server Architecture (crypto_vault.c)
+
+This secure server accepts connection requests, presents its unique public key modulus \(N\), and asks the client to supply an encrypted administrative payload token. If the token decrypts to a valid confirmation code, it triggers a shell.
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+// Assumed integration with a big-number mathematics library like GMP
+#include <gmp.h> 
+
+void win() {
+    printf("[+] Cryptographic token validated! Elevating context...\n");
+    system("/bin/sh");
+}
+
+void process_handshake() {
+    // Statically known Public Exponent e
+    mpz_t e, n_server, encrypted_token, decrypted_code;
+    mpz_init_set_str(e, "65537", 10);
+    mpz_init(n_server);
+    mpz_init(encrypted_token);
+    mpz_init(decrypted_code);
+
+    // This unique server modulus N is loaded at initialization 
+    // In this challenge, the target server's modulus N is:
+    mpz_set_str(n_server, "143499427027429676602497675712217743903264627447", 10);
+
+    printf("=== SECURE VAULT AGENT ===\n");
+    printf("Server Modulus (N): ");
+    mpz_out_str(stdout, 10, n_server);
+    printf("\n");
+
+    printf("Submit encrypted authentication token: ");
+    char input_buf[256];
+    if (fgets(input_buf, sizeof(input_buf), stdin) == NULL) return;
+    mpz_set_str(encrypted_token, input_buf, 10);
+
+    // DECRYPTION WORKFLOW (Simulated using private exponent d)
+    // decrypted_code = (encrypted_token ^ d) % n_server
+    // Let's assume the server performs the secure math check here
+    
+    // LOGIC CHECK: Validated plaintext must match the integer hash string: 13377331
+    if (mpz_cmp_ui(decrypted_code, 13377331) == 0) {
+        win();
+    } else {
+        printf("[-] Cryptographic Verification Failed. Intrusion terminated.\n");
+    }
+}
+
+int main() {
+    setbuf(stdout, NULL);
+    process_handshake();
+    return 0;
+}
+Use code with caution.
+
+3. Collecting Vulnerable Data from the Wild
+
+Imagine you query an alternate public node or look at historical challenge logs and find a sister instance executing the exact same binary framework, which presents its own unique modulus \(N_{2}\):
+• \(N_{1}\) (Target Server): 143499427027429676602497675712217743903264627447
+• \(N_{2}\) (Shared Entropy Server): 156689035133604473872242564244565749298518607317
+
+4. The Python Exploit Script (crypto_math_solve.py)
+
+Using pwntools along with Python’s built-in arbitrary-precision math functions, we can instantly break the cryptographic boundary, reconstruct the private key, forge the token, and command the network target.
+python
+#!/usr/bin/env python3
+from pwn import *
+import math
+
+# Configure connection parameters
+HOST = '127.0.0.1'
+PORT = 5555
+
+# 1. Target server's public variables parsed from static analysis or initial leak
+n1 = 143499427027429676602497675712217743903264627447
+e = 65537
+
+# 2. Leaked secondary modulus from vulnerable entropy generation system
+n2 = 156689035133604473872242564244565749298518607317
+
+log.info("Commencing Greatest Common Divisor factorization exploit...")
+
+# 3. Compute the shared prime factor 'p' using Euclidean Math
+p = math.gcd(n1, n2)
+
+if p > 1 and p != n1:
+    log.success(f"Common factor discovered! Shared Prime p: {p}")
+else:
+    log.error("GCD structural link missing. Moduli are coprime.")
+    exit(1)
+
+# 4. Mathematically reconstruct the secret matching parameters for Target 1
+q = n1 // p
+phi = (p - 1) * (q - 1)
+
+# Compute the Private Decryption Exponent 'd' via the Modular Multiplicative Inverse
+d = pow(e, -1, phi)
+log.success(f"Private Key exponent 'd' successfully calculated: {d}")
+
+# 5. Forge the administrative command token
+# To authenticate, we must pass an integer that decrypts to: 13377331
+target_plaintext = 13377331
+
+# Encrypt the token using our forged private key: forged_token = (plaintext ^ d) % n1
+# (Since RSA decryption is the inverse math of signature creation, this acts as a signature)
+forged_token = pow(target_plaintext, d, n1)
+log.info(f"Generated forged cryptographic authentication token: {forged_token}")
+
+# 6. Interact with the live remote target to seize execution control
+io = remote(HOST, PORT)
+io.recvuntil(b"Submit encrypted authentication token: ")
+
+# Send the forged token over the socket array
+io.sendline(str(forged_token).encode())
+
+# Drop cleanly into the shell context provided by win()
+io.interactive()
+Use code with caution.
+
+5. Architectural Mitigations for Cryptographic Implementations
+
+Securing cryptographic binaries requires hardening raw math routines against algorithmic attacks:
+• Incorporate Independent Cryptographic Salting (Unique Seeds): Never let cryptographic generation routines rely exclusively on standard system time or basic hardware configurations for initialization entropy. Use cryptographically secure entropy pools (/dev/urandom or hardware-level getrandom() loops) to ensure every generated prime number is universally unique.
+• Verify Key Moduli Coprimality at Runtime: Before a production system accepts or deploys structural keys generated within cluster structures, run cross-factor validation tests against known public key registries to guarantee the \(GCD\) profile yields 1, verifying complete absolute mathematical insulation between independent nodes.
 
