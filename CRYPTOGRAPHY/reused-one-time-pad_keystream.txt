@@ -1,1 +1,82 @@
 
+🚀 Method 1: Automated Cracking with mtp (Fastest for Many Files)
+
+If you have a collection of several ciphertexts (3 or more) that all reused the exact same keystream, you can automate the entire decryption process using a Many-Time Pad solver. These tools look at the statistical spaces and character distributions across all files simultaneously to rebuild the plaintexts.
+
+Step 1: Install the automated solver
+
+bash
+pip install mtp-solver
+Use code with caution.
+
+Step 2: Put your hex ciphertexts into a text file
+
+Create a file named ciphertexts.txt containing one hex-encoded ciphertext per line:
+text
+4a0e1b1107...
+591c00051e...
+4f03120c15...
+Use code with caution.
+
+Step 3: Run the solver
+
+bash
+mtp-solver --file ciphertexts.txt
+Use code with caution.
+The tool will statistically isolate the spaces, leak character boundaries, and print out all recovered plaintexts at once.
+
+✍️ Method 2: Interactive "Crib Dragging" (Best for 2 Reused Pads)
+
+If you only have two ciphertexts, automated statistical tools might fail due to lack of data. In this scenario, use an interactive crib dragging tool to manually slide common English words (cribs) through the XORed result.
+
+Step 1: Install the script
+
+bash
+pip install cribdrag
+Use code with caution.
+
+Step 2: Combine the two hex strings
+
+XOR your two ciphertexts together using a quick Python one-liner to get the combined message target:
+bash
+python3 -c "
+c1 = bytes.fromhex('5a0f121d071a170b0704')
+c2 = bytes.fromhex('4b1c07011a0c0b021319')
+print(bytes(a ^ b for a, b in zip(c1, c2)).hex())
+"
+Use code with caution.
+Output example: 1113151c1d161c09141d
+
+Step 3: Drag a common word
+
+Pass that resulting hex string into cribdrag along with a very common word choice (like "the ", "and ", or "that"):
+bash
+python3 -m cribdrag 1113151c1d161c09141d
+Use code with caution.
+The tool will check every possible index. If positioning the word "the " at index 4 yields a readable English fragment (e.g., "from") in the other message, you have cracked that section of the text!
+
+🐍 Method 3: Complete Keystream Extraction Script
+
+If you successfully guess or recover even a small portion of the plaintext from any of the reused messages, you can immediately extract the corresponding section of the actual keystream and apply it to all other files.
+python
+# Save this as extract_otp.py or run via python3
+cipher_hex_1 = "5a0f121d071a170b0704"  # Reused ciphertext #1
+known_plain_1 = b"secretmsg1"           # Plaintext you figured out
+
+# 1. Isolate the exact Key Pad stream bytes
+c1_bytes = bytes.fromhex(cipher_hex_1)
+keystream = bytes(c ^ p for c, p in zip(c1_bytes, known_plain_1))
+print(f"Recovered Pad/Keystream (Hex): {keystream.hex()}")
+
+# 2. Instantly decrypt the second file using that exact key material
+cipher_hex_2 = "4b1c07011a0c0b021319"  # Reused ciphertext #2
+c2_bytes = bytes.fromhex(cipher_hex_2)
+
+plain_2 = bytes(c ^ k for c, k in zip(c2_bytes, keystream))
+print(f"Decrypted Message 2: {plain_2.decode(errors='ignore')}")
+Use code with caution.
+
+💡 Quick Verification Tip
+
+Unsure if two ciphertexts actually share a reused one-time pad? You can check them using an Index of Coincidence (IC) test. If you XOR two un-related randomly encrypted files, the result looks completely random.
+However, if you XOR two files that reused the same pad, the key disappears, leaving \(P_1 \oplus P_2\). The Index of Coincidence of that XOR result will match the statistical profile of natural language (~0.06) rather than random noise (~0.038).
