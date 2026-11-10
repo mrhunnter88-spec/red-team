@@ -1,1 +1,90 @@
 
+🧮 Attack 1: Bellcore Attack against RSA-CRT (Total Key Recovery via One Fault)
+
+The most famous fault attack targets RSA when it uses the Chinese Remainder Theorem (CRT) to speed up signing. RSA-CRT computes two separate half-signatures:
+\(s_{1}=m^{d\mathinner{\;\left(\mod \,p-1\right)}}\mathinner{\;\left(\mod \,p\right)}\quad \text{and}\quad s_{2}=m^{d\mathinner{\;\left(\mod \,q-1\right)}}\mathinner{\;\left(\mod \,q\right)}\)
+They are then combined into the final signature \(S\) using the Chinese Remainder Theorem.
+If you inject a fault that corrupts the computation of \(s_{1}\) but leaves \(s_{2}\) perfectly intact, the resulting faulty signature (\(S_{f}\)) will be mathematically valid modulo \(q\), but completely invalid modulo \(p\).
+Because of this asymmetrical math breakdown, you can recover the secret prime factor \(q\) instantly from the terminal using a single Greatest Common Divisor (\(\gcd \)) computation:
+\(q=\gcd (S-S_{f},N)\)
+
+Execute the Bellcore Extraction via Python
+
+Copy and paste this terminal script, supplying your public modulus \(N\), the correct signature \(S\), and the faulty signature \(S_{f}\):
+python
+import math
+
+N = 0xabcdef...  # The Public Modulus
+S = 0x123456...  # The Valid (uncorrupted) Signature
+Sf = 0x7890ab... # The Faulty (glitched) Signature
+
+# Isolate the shared component difference
+secret_prime_q = math.gcd(S - Sf, N)
+
+if secret_prime_q > 1 and secret_prime_q != N:
+    secret_prime_p = N // secret_prime_q
+    print(f"🎯 Secret Prime q Recovered: {secret_prime_q}")
+    print(f"🎯 Secret Prime p Recovered: {secret_prime_p}")
+    print("✨ Both primes extracted successfully. You can now generate the private key d.")
+else:
+    print("Verification failed: Check your input integers or ensure the fault occurred in s_1.")
+Use code with caution.
+
+🎛️ Attack 2: Differential Fault Analysis (DFA) on AES Round States
+
+When attacking symmetric block ciphers like AES-128, a fault is injected into the 9th round (right before the final mix-columns/add-round-key phase). Flipping a single byte in the internal state matrix during the 9th round causes exactly 4 bytes of the final 16-byte ciphertext block to become corrupted.
+By using command-line DFA tools, you map out the relationship between the clean ciphertext block and the corrupted ciphertext block to reverse the 10th-round key bytes.
+
+Step 1: Install a dedicated DFA analyzer
+
+The standard open-source utility for automated AES fault recovery via the terminal is phoenix or specialized scripts from the Deadpool side-channel analysis framework.
+bash
+pip install phoenix-aes
+Use code with caution.
+
+Step 2: Feed clean/faulty pairs to the cracker
+
+Create a text file tracking your outputs. You usually need between 2 and 5 unique faulty ciphertexts (generated from the same plaintext but with faults injected at different byte slots) to narrow down the key possibilities completely.
+bash
+# Execute the DFA state recovery solver
+phoenix -c clean_ciphertext.hex -f faulty_ciphertexts.txt
+Use code with caution.
+Output: The engine steps backward through the final AddRoundKey layer, tracks the diffusion pattern of the corrupted bytes, and outputs the complete AES Round Key 10, which can be easily mathematically reversed to get the primary master key.
+
+🖥️ Method 3: Simulating Fault Injection Loops for Security Verification
+
+If you are auditing code or building custom firmware routines, you can simulate a software-level fault injection directly in Python to test if your architecture gracefully handles memory corruption or bit-flipping attacks.
+python
+import random
+
+def secure_rsa_crt_sign(message, d_p, d_q, p, q, N):
+    # Simulate step 1: compute sub-signatures
+    s_1 = pow(message, d_p, p)
+    s_2 = pow(message, d_q, q)
+    
+    # --- SIMULATE PHYSICAL FAULT GLITCH ---
+    # We randomly inject a hardware fault by corrupting s_1 via a bitflip
+    s_1 ^= (1 << random.randint(0, 1024))
+    # --------------------------------------
+    
+    # CRT recombination math formula
+    X = p * pow(p, -1, q)
+    Y = q * pow(q, -1, p)
+    final_signature = (s_2 * Y + s_1 * X) % N
+    
+    # 🛡️ DEFENSIVE MITIGATION COUNTERMEASURE:
+    # Always double check the signature signature output mathematically before transmitting it!
+    if pow(final_signature, 3, N) != message: # Assuming e=3
+        print("🛑 WARNING: Hardware fault detected! Suppressing output to prevent key leak.")
+        return None
+        
+    return final_signature
+Use code with caution.
+
+🛡️ Hardening Systems Against Fault-Induced Key Recovery
+
+To ensure your devices and software builds are completely resilient against physical glitching and DFA attacks during a terminal-based security audit, verify these design practices:
+1. Implement Dual Execution / Redundancy: Force critical math loops to calculate twice on different hardware threads. Compare both results before broadcasting the signature or token over the network interface.
+2. Always Verify Signatures Before Transmission: As demonstrated in the simulation script above, explicitly verify the finished signature using the public exponent (\(e\)) before writing it to the output socket. If the check fails, instantly wipe the working memory register and throw a generic system error.
+3. Inject Randomized Hardware Delays: In embedded environments, insert varying dummy instruction clock cycles (jitter) right before sensitive cryptographic rounds. This destroys the temporal precision an attacker needs to target a specific round phase with a laser or power spike.
+
