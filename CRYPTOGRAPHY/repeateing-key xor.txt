@@ -1,1 +1,102 @@
 
+🚀 Method 1: Automated Decryption via ciphey (Fastest)
+
+If you just want the plaintext instantly, ciphey will automatically calculate the key length, extract the repeating key matrix, and print out the decoded English output.
+
+Step 1: Install the toolkit
+
+bash
+pip install ciphey
+Use code with caution.
+
+Step 2: Pass the ciphertext
+
+Supply your hex-encoded repeating-key XOR string directly to the interface:
+bash
+ciphey -t "0e0b213c2c2a07011d3a242f360744031d272023"
+Use code with caution.
+
+🐍 Method 2: Comprehensive Python Script (No Key Known)
+
+If you are working on a classic cryptography challenge (like Cryptopals Challenge 6), copy and paste this complete script into your terminal. It breaks the cipher by:
+1. Finding the likely key length (guessing sizes 2 to 40) using the Hamming Distance metric (the number of differing bits between blocks).
+2. Transposing the ciphertext blocks into single-byte groups.
+3. Solving each group using English frequency scoring.
+python
+# Save this as repeating_xor_cracker.py or paste into python3
+import string
+
+def hamming_distance(b1, b2):
+    return sum(bin(x ^ y).count('1') for x, y in zip(b1, b2))
+
+def english_score(text):
+    weights = {' ': 13, 'e': 12.7, 't': 9.0, 'a': 8.1, 'o': 7.5, 'i': 6.9, 'n': 6.7, 's': 6.3, 'h': 6.0, 'r': 5.9, 'd': 4.2, 'l': 4.0, 'c': 2.7, 'm': 2.4, 'u': 2.7}
+    return sum(weights.get(chr(b).lower(), 0) for b in text)
+
+def break_single_byte_xor(block):
+    best_score, best_key = -1, 0
+    for key in range(256):
+        score = english_score(bytes(b ^ key for b in block))
+        if score > best_score:
+            best_score, best_key = score, key
+    return best_key
+
+# --- YOUR TARGET CIPHERTEXT (HEX FORMAT) ---
+ciphertext_hex = "0e0b213c2c2a07011d3a242f360744031d272023"
+c_bytes = bytes.fromhex(ciphertext_hex)
+
+# Step 1: Find the best KEYSIZE based on normalized Hamming distance
+best_keysize = 0
+min_distance = float('inf')
+
+for keysize in range(2, min(40, len(c_bytes) // 2)):
+    # Grab the first few chunks to get an average bit distance
+    b1 = c_bytes[0:keysize]
+    b2 = c_bytes[keysize:keysize*2]
+    b3 = c_bytes[keysize*2:keysize*3]
+    b4 = c_bytes[keysize*3:keysize*4]
+    
+    dist = (hamming_distance(b1, b2) + hamming_distance(b2, b3) + hamming_distance(b3, b4)) / 3
+    normalized_dist = dist / keysize # Divide by keysize to standardize metrics
+    
+    if normalized_dist < min_distance:
+        min_distance = normalized_dist
+        best_keysize = keysize
+
+print(f"📊 Most statistically probable Key Size: {best_keysize} bytes")
+
+# Step 2: Transpose the blocks into independent groups and solve
+key_bytes = []
+for i in range(best_keysize):
+    # Gather every Nth byte (all bytes encrypted by the same key position)
+    transposed_block = c_bytes[i::best_keysize]
+    key_bytes.append(break_single_byte_xor(transposed_block))
+
+final_key = bytes(key_bytes)
+print(f"🔒 Recovered Key String: {final_key.decode(errors='ignore')} (Hex: {final_key.hex()})")
+
+# Step 3: Decrypt the entire text using the recovered repeating key
+plaintext = bytes(c_bytes[i] ^ final_key[i % len(final_key)] for i in range(len(c_bytes)))
+print(f"🎯 Plaintext:\n{plaintext.decode(errors='ignore')}")
+Use code with caution.
+
+💻 Method 3: Encrypting / Decrypting When You Already Have the Key
+
+If you already know the repeating password and want to execute or decrypt it rapidly straight from a Bash/Zsh pipeline, use this Python-driven terminal command shortcut:
+bash
+# Encrypt or Decrypt plaintext using a known repeating key string
+python3 -c "
+import sys
+key = b'ICE'
+cipher = bytes.fromhex('0e0b213c2c2a07011d3a242f360744031d272023')
+out = bytes(c ^ key[i % len(key)] for i, c in enumerate(cipher))
+print(out.decode(errors='ignore'))
+"
+Use code with caution.
+
+🔍 How to Identify Repeating-Key XOR text
+
+If you run across a binary stream or a data dump, you can confirm it uses a repeating-key XOR mechanism through two traits:
+• The Index of Coincidence (IC) Drops: If you run a standard monoalphabetic IC check over the whole file, it will display a low score (~0.04), indicating it looks like random noise. However, if you step through the file at regular intervals (e.g., pulling every 4th or 5th byte), the IC of that sub-slice will suddenly shoot up to ~0.06 (the English language text baseline).
+• Repeated Phrases Match: If the original text contains highly repeated phrases (like the  or \x00\x00\x00\x00), it will manifest as repeating blocks in the ciphertext, separated by multiples of the key length.
+
