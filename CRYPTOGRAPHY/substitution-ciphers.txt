@@ -1,1 +1,56 @@
 
+🚀 Method 1: Automated Cracking with subbreaker (Fastest)
+
+The most effective open-source terminal tool for this is subbreaker. It uses text n-gram statistics to automatically solve the cipher in seconds without needing a key.
+
+Step 1: Install the tool via pip
+
+bash
+pip install subbreaker
+Use code with caution.
+
+Step 2: Run the automated solver
+
+Pass your ciphertext directly into the command. The tool will analyze letter patterns and print out the most statistically likely plaintext and decryption key.
+bash
+echo "Sgbyb, h rreunm npaauzb qre mhehbebe un rreunm kkd." | subbreaker break --lang en
+Use code with caution.
+
+🐍 Method 2: Python One-Liner (When You Have a Key)
+
+If you already know the 26-letter substitution alphabet key (where the position in the key matches the standard A–Z alphabet), you can map and decrypt it instantly using a Python string translation matrix.
+bash
+python3 -c "
+cipher = 'Sgbyb, h rreunm npaauzb qre mhehbebe un rreunm kkd.'
+key    = 'ZEBRASCDFGHIJKLMNOPQTUVWXY' # Your 26-letter cipher alphabet
+alpha  = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+print(cipher.translate(str.maketrans(key + key.lower(), alpha + alpha.lower())))
+"
+Use code with caution.
+
+🐧 Method 3: Interactive Guessing with tr (Manual/Linux/macOS)
+
+If you want to solve it like a puzzle using frequency analysis clues, you can use the standard Unix tr command. You can gradually map ciphertext letters to plaintext letters by changing the second string set.
+bash
+# Ciphertext: Sgbyb, h rreunm npaauzb
+# Let's guess that 'S'='H', 'g'='e', 'b'='l', 'y'='o'
+echo "Sgbyb, h rreunm npaauzb" | tr 'Sgby' 'Helo'
+Use code with caution.
+Output: Hello, h rreunm npaauzb
+You can progressively add letters to your tr translation string as you deduce more words (like identifying common single letters as A or I, and three-letter words as THE).
+
+🪟 Method 4: Windows PowerShell Mapping (When You Have a Key)
+
+If you are on Windows without Python installed, you can use a PowerShell script block to manually translate a cipher text using a known key alphabet.
+powershell
+$cipher = "Sgbyb, h rreunm npaauzb"
+$key    = "ZEBRASCDFGHIJKLMNOPQTUVWXY"
+$alpha  = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+-join ($cipher.ToCharArray() | ForEach-Object {
+    $idx = $key.IndexOf([char]::ToUpper($_))
+    if ($idx -ge 0) {
+        if ([char]::IsUpper($_)) { $alpha[$idx] } else { [char]::ToLower($alpha[$idx]) }
+    } else { $_ }
+})
+Use code with caution.
+
