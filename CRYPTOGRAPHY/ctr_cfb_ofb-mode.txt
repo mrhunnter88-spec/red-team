@@ -1,1 +1,97 @@
 
+🕵️ Method 1: The Many-Time Pad Attack (When Nonce is Reused)
+
+If two or more messages are encrypted using CTR, CFB, or OFB mode with the exact same Key and Nonce/IV, then C1 = P1 XOR KeyStream and C2 = P2 XOR KeyStream.
+By XORing the two ciphertexts together, the key stream cancels out:
+\(C1\oplus C2=P1\oplus P2\)
+
+Step 1: Install a dedicated cracker
+
+The fastest tool for this is cribdrag, which lets you guess words in the plaintext stream by sliding ("dragging") common phrases across the XORed result.
+bash
+pip install cribdrag
+Use code with caution.
+
+Step 2: Extract the key stream cancellation via Python
+
+Run this command-line shortcut to merge your two known hex ciphertexts:
+bash
+python3 -c "
+c1 = bytes.fromhex('4a0e1b1107')
+c2 = bytes.fromhex('591c00051e')
+xored = bytes(a ^ b for a, b in zip(c1, c2))
+print(xored.hex())
+"
+Use code with caution.
+Output: 13121b1419
+
+Step 3: Drag a "crib" (common word) to leak plaintext
+
+Pass that hex output into cribdrag alongside a common English word like "the " or "have" to instantly reveal fragments of the other message:
+bash
+python3 -m cribdrag 13121b1419
+Use code with caution.
+
+🪓 Method 2: Stream Bit-Flipping Attack (Flawless Target Modification)
+
+Unlike CBC mode (where flipping a bit destroys the current block to alter the next one), CTR, CFB, and OFB feature perfect 1-to-1 linear bit mapping. Changing bit 4 of byte 2 in the ciphertext changes exactly bit 4 of byte 2 in the decrypted plaintext.
+If a CTR cookie assigns you user, you can rewrite it to root on the fly.
+bash
+# 1. Save your original ciphertext hex string to a file
+echo "54617a7a" > cookie.hex && xxd -r -p cookie.hex cookie.bin
+
+# 2. Use Python to swap out 'user' for 'root' via precise XOR manipulation
+python3 -c "
+data = bytearray(open('cookie.bin', 'rb').read())
+original = b'user'
+target   = b'root'
+for i in range(len(original)):
+    data[i] = data[i] ^ original[i] ^ target[i]
+open('malicious.bin', 'wb').write(data)
+"
+
+# 3. Print your updated, fully valid session token string
+xxd -p malicious.bin
+Use code with caution.
+
+🐍 Method 3: Scripted CTR/CFB Decryption (When Key/IV are Known)
+
+If you already have the encryption key and IV/Nonce, you can rapidly decrypt payloads directly from your terminal using Python's cryptography library.
+
+Step 1: Install dependencies
+
+bash
+pip install cryptography
+Use code with caution.
+
+Step 2: Run the automated decryption wrapper
+
+Copy and paste this terminal script, swapping out your target hex string, key, and IV:
+bash
+python3 -c "
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+import bytes
+
+key = b'0123456789abcdef'      # 16-byte key
+nonce = b'12345678'             # 8-byte nonce/IV
+ciphertext = bytes.fromhex('8a5f3b...')
+
+# For CTR mode:
+cipher = Cipher(algorithms.AES(key), modes.CTR(nonce))
+
+# Alternate choices (uncomment if needed):
+# cipher = Cipher(algorithms.AES(key), modes.CFB(nonce))
+# cipher = Cipher(algorithms.AES(key), modes.OFB(nonce))
+
+decryptor = cipher.decryptor()
+plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+print(plaintext.decode(errors='ignore'))
+"
+Use code with caution.
+
+📊 Comparing the Structural Flaws
+
+When attacking these modes, keep these core behaviors in mind to choose your approach:
+• CTR (Counter): Entirely parallelizable. If you know the counter values, you can decrypt or modify any block independently without touching the surrounding bytes.
+• CFB (Cipher Feedback): Ciphertext is fed into the next step. While it still permits bit-flipping, altering a ciphertext byte will corrupt the next block during decryption before alignment restores itself.
+• OFB (Output Feedback): Internal key stream generation is entirely independent of the plaintext text. This makes it highly vulnerable to complete state recovery if any plaintext/ciphertext pair is leaked.
