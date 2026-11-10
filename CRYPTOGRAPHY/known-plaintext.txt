@@ -1,1 +1,94 @@
 
+📦 Method 1: PKZIP Known-Plaintext Attack (Using pkcrack)
+
+Legacy .zip encryption (ZipCrypto) is highly vulnerable to a known-plaintext attack. If you have an encrypted zip file, and you happen to have an unencrypted copy of just one of the files inside it (even a common system file, image, or readme), you can break the encryption for the entire archive.
+
+Step 1: Install pkcrack
+
+On Linux, macOS, or Windows (via WSL), install the tool:
+bash
+sudo apt install pkcrack  # Ubuntu/Debian/Kali
+Use code with caution.
+
+Step 2: Prep your files
+
+You need:
+1. secret.zip: The encrypted archive.
+2. known_file.txt: The unencrypted file you already have.
+3. known_compressed.zip: A zip you create yourself containing only that unencrypted file (compressed using the exact same zip tool version if possible).
+
+Step 3: Run the attack
+
+Execute the command to automatically extract the internal keys and generate a decrypted archive:
+bash
+pkcrack -d secret.zip -p known_file.txt -P known_compressed.zip -d decrypted.zip
+Use code with caution.
+Output: The tool will resolve the keys and output decrypted.zip containing all hidden files.
+
+🐍 Method 2: Recovering Stream Cipher Keystreams (CTR/OFB/RC4)
+
+Because stream ciphers rely on Ciphertext = Plaintext XOR Keystream, having a known piece of plaintext means you can instantly isolate the exact pseudo-random key stream bytes:
+\(\text{Keystream}=\text{Ciphertext}\oplus \text{Known-Plaintext}\)
+
+Step 1: Extract the keystream via Python
+
+If you know the first 5 bytes of a file are a standard header (like \x89PNG\r for a PNG image or %PDF- for a PDF), use this terminal command to extract that portion of the key stream:
+bash
+python3 -c "
+cipher_bytes = bytes.fromhex('f3aa8c129e') # First 5 bytes of ciphertext
+known_plain  = b'%PDF-'                    # Known file header string
+keystream    = bytes(c ^ p for c, p in zip(cipher_bytes, known_plain))
+print(f'Recovered Keystream Bytes: {keystream.hex()}')
+"
+Use code with caution.
+
+Step 2: Reuse the keystream to decrypt another file
+
+If the system reused that exact same keystream to encrypt a second file, you can now strip away the cipher using your recovered hex string:
+bash
+python3 -c "
+c2 = bytes.fromhex('94be813cb2') # Target ciphertext bytes from file #2
+ks = bytes.fromhex('c6cfcd3dc3') # Your recovered keystream bytes
+plaintext2 = bytes(c ^ k for c, k in zip(c2, ks))
+print(plaintext2.decode(errors='ignore'))
+"
+Use code with caution.
+
+🔑 Method 3: Linear Key Recovery for Matrix/Affine Ciphers (Hill Cipher)
+
+If a system uses linear algebra blocks (like a Hill Cipher), having a small block of known plaintext allows you to solve the key matrix using matrix inversion (\(K = C \cdot P^{-1}\)). You can do this in seconds using Python's numeric libraries.
+
+Step 1: Install NumPy
+
+bash
+pip install numpy
+Use code with caution.
+
+Step 2: Execute matrix inversion solver
+
+bash
+python3 -c "
+import numpy as np
+
+# Example for a 2x2 Hill Cipher modulo 26
+# P = [[7, 4], [11, 15]]  -> Known Plaintext block ('HE', 'LO')
+# C = [[19, 1], [4, 18]]   -> Corresponding Ciphertext block
+
+P = np.array([[7, 4], [11, 15]])
+C = np.array([[19, 1], [4, 18]])
+
+# Calculate modular inverse matrix of P mod 26
+det = int(round(np.linalg.det(P)))
+det_inv = pow(det, -1, 26)
+P_adj = np.round(np.linalg.inv(P) * det).astype(int)
+P_inv = (det_inv * P_adj) % 26
+
+# Recover Key Matrix
+Key = np.dot(C, P_inv) % 26
+print('Recovered Key Matrix:\n', Key)
+"
+Use code with caution.
+
+🛡️ modern Ciphers and KPA Resilience
+
+Keep in mind that modern block ciphers like AES-128 or AES-256 are mathematically designed to be completely immune to traditional Known-Plaintext Attacks. Even if you know the exact plaintext of a 1GB file encrypted with AES, it will not help you deduce the 256-bit key or decrypt any other files, thanks to its high-diffusion confusion rounds.
