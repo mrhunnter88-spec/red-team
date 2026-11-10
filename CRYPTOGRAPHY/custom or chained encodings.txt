@@ -1,1 +1,81 @@
 
+⛓️ 1. Handling Chained Encodings (Piping Operations)
+
+The most effective way to crack or create chained encodings in a Unix-like terminal (Linux/macOS) is to pipe (|) the standard output of one command directly into the standard input of the next.
+
+Scenario A: Decoding a Complex Multi-Layered String
+
+Assume you have a string that has been encoded through three layers: Hex, then Base64, and finally URL Encoded.
+Target Payload: JVValid%2533%2544%2533%2544 (Layer 3)
+To decode it back to plaintext, you reverse the operations step-by-step using a linear pipeline:
+bash
+# 1. Store the chained string
+CHAINED_STR="U0dWc2JHOGdVMlZqY21WMElnPT0="
+
+# 2. Pipeline: Decode Base64 -> Decode Base64 (again) -> Print plaintext
+echo "$CHAINED_STR" | base64 -d | base64 -d
+# Output: Secret Message
+Use code with caution.
+
+Scenario B: Building a Nested Exploit Payload
+
+If you are testing an API filter that requires inputs to be passed in a specific structural order—such as an ASCII payload that must be Base64 encoded first, and then wrapped in a URL query safe format:
+bash
+# Pipeline: Echo string -> Convert to Base64 -> Pass to Python URL encoder
+echo -n "admin' OR 1=1--" | base64 | python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.stdin.read().strip()))"
+# Output: YWRtaW4lMjclMjBPUiUyMDExMS0t
+Use code with caution.
+
+🎨 2. Solving Custom Alphabet Encodings (Base64 / Base58)
+
+Developers sometimes attempt to implement "security through obscurity" by changing the standard index alphabet array of a known format. For example, a custom Base64 encoder might swap the traditional alphabet (A-Z, a-z, 0-9, +, /) for a randomized string pattern.
+Standard terminal commands will fail or throw corruption errors on these strings. You solve this by writing a custom map matrix or translation layer.
+
+Method A: Custom Base64 Alphabet Decoding via tr
+
+If an application uses a custom Base64 alphabet—such as replacing the standard order with a custom string sequence—you can use the Unix tr (translate) command to map the custom characters back to standard Base64 characters before passing it to the decoder.
+bash
+# Custom Alphabet used by the target: '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_'
+# Standard Base64 Alphabet:          'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+CUSTOM_PAYLOAD="u39xr3S="
+
+# Map custom alphabet characters to standard ones, then decode
+echo "$CUSTOM_PAYLOAD" | tr '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_' 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/' | base64 -d
+Use code with caution.
+
+Method B: Custom Base58 Decoding (Bitcoin Style)
+
+Base58 is a custom encoding layout that strips out visually ambiguous characters (0, O, I, l) and punctuation (+, /) to prevent human transcription errors. If you need to decode or encode Base58 from the terminal, use Python's specialized string libraries:
+bash
+# Install the missing library mapping format
+pip install base58
+
+# Decode a Base58 string directly from a terminal string execution
+python3 -c "import base58; print(base58.b58decode('2NEpo7TZ').decode())"
+# Output: hello
+Use code with caution.
+
+🤖 3. Automated Detection & Decoding with CyberChef CLI / ciphey
+
+If you are looking at a deeply nested or unknown chained encoding format (e.g., a string that has been encoded 10 times in random variations of Hex, Base32, and Rot13), manual piping becomes inefficient.
+
+Option A: Natural Language Extraction with ciphey
+
+ciphey uses a natural language processing core to detect encryption and multi-layered encodings automatically. It reverses them sequentially and prints the resulting text without any manual configuration.
+bash
+# Pass any deeply chained or custom-encoded string to automate the extraction
+ciphey -t "NDg2NTZjNmM2ZjIwNTc2ZjcyNmM2NDIx"
+Use code with caution.
+
+Option B: CyberChef Serverless Command Line
+
+If you prefer the modularity of CyberChef but need to run it directly inside a terminal automation pipeline, you can execute CyberChef recipes via Node.js or run the background API stack using curl scripts against a local instance.
+
+🗂️ Blueprint for Custom/Chained Troubleshooting
+
+When approaching an unfamiliar nested data string during a system audit or code review, follow this analytical path from your console:
+1. Count the String Character Variance: Use sort | uniq to see how many unique characters exist in the block. If it maps strictly to 16, 32, or 64 variant options, it is a standard base variation using a custom table layout.
+2. Look for Layer Signatures: If a string terminates with %3D or %3d, it is a URL-encoded string hiding a Base64 trailing = padding block. Always strip the URL layers first.
+3. Verify Header Blocks: Look for magic sequence markers. If a hex stream decodes into the ASCII text SGVsbG8..., your first layer removal revealed a secondary Base64 string signature block.
+
