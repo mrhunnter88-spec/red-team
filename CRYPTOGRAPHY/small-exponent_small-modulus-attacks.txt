@@ -1,1 +1,126 @@
 
+🧮 Attack 1: Small Public Exponent (\(e=3\)) — Coppersmith's & Cube Root Attacks
+
+When the public exponent \(e\) is small (most commonly \(e=3\)), two catastrophic flaws can occur depending on how the message is padded:
+
+Scenario A: Direct Cube Root Attack (No Padding)
+
+If a small message \(m\) is encrypted without padding, and the value of \(m^{e}\) is smaller than the modulus \(N\) (\(m^3 < N\)), the modulus never wraps around. The encryption formula simplifies from \(c = m^3 \pmod N\) to a basic algebraic cube: \(c = m^3\).
+You can decrypt this instantly using a Python one-liner by calculating the exact mathematical cube root:
+bash
+python3 -c "
+import math
+ciphertext = 125000000000 # Example numerical ciphertext
+# Calculate the exact integer cube root
+plaintext_int = round(ciphertext ** (1/3))
+print(f'Decrypted Integer: {plaintext_int}')
+print(f'ASCII Message: {bytes.fromhex(hex(plaintext_int)[2:]).decode()}')
+"
+Use code with caution.
+
+Scenario B: Coppersmith’s Short Message Attack
+
+If the message is padded but you know a significant portion of it (e.g., you know the format is "The flag is: [unknown_bytes]"), Coppersmith's Method can find the small unknown root of the polynomial equation \(f(x) = (Target + x)^3 - c \pmod N\).
+The premier command-line tool for this mathematical analysis is SageMath:
+python
+# Run this inside a SageMath terminal (sage)
+N = 0xabcdef... # The RSA Modulus
+c = 0x123456... # The Ciphertext
+e = 3
+
+# Define the polynomial over a modular ring
+R.<x> = PolynomialRing(Zmod(N))
+known_prefix = 0x54686520666c61672069733a00000000 # "The flag is: ..."
+f = (known_prefix + x)^e - c
+
+# Find the small root dynamically in seconds
+roots = f.small_roots(X=2^32, beta=1.0)
+if roots:
+    print(f"Found missing text block: {hex(int(roots[0]))}")
+Use code with caution.
+
+📡 Attack 2: Small Exponent Broadcast Attack (Håstad's Broadcast)
+
+If the same message \(m\) is encrypted and broadcasted to \(e\) or more different users who all share a small public exponent (like \(e=3\)), using different moduli (\(N_1, N_2, N_3\)), an attacker can use the Chinese Remainder Theorem (CRT) to combine the ciphertexts and bypass the modulus.
+
+Step 1: Execute the CRT solver via Python
+
+Copy and paste this terminal script, supplying the different moduli and ciphertexts captured from the network:
+python
+from functools import reduce
+
+def chinese_remainder(n, a):
+    sum_val = 0
+    prod = reduce(lambda a, b: a * b, n)
+    for n_i, a_i in zip(n, a):
+        p = prod // n_i
+        sum_val += a_i * pow(p, -1, n_i) * p
+    return sum_val % prod
+
+# Gather 3 unique moduli and their 3 respective ciphertexts
+moduli = [N1, N2, N3]
+ciphertexts = [C1, C2, C3]
+
+# Combine them using CRT
+combined_cube = chinese_remainder(moduli, ciphertexts)
+
+# Take the exact cube root of the combined value
+plaintext_int = int(round(combined_cube ** (1/3)))
+print(bytes.fromhex(hex(plaintext_int)[2:]).decode(errors='ignore'))
+Use code with caution.
+
+🪓 Attack 3: Small Modulus (\(N\)) — Direct Prime Factorization
+
+If an RSA public key uses a Small Modulus (historically under 512 bits, but easily factorable up to 768 or 1024 bits using modern computational clusters), the security foundation of RSA fails. If you can factor \(N\) into its prime components \(p\) and \(q\), you can easily reconstruct the private key \(d\).
+The most efficient command-line approach uses automated cloud lookups and factorization tools.
+
+Method A: Instant Online API Lookup (Factordb)
+
+Before spinning up heavy local compute power, check if the modulus has already been factored by the global security community using the factordb Python utility:
+bash
+pip install factordb-pycli
+factordb 12474149811438318253  # Replace with your decimal Modulus N
+Use code with caution.
+If a match is found, the terminal will instantly spit out the exact values for prime \(p\) and prime \(q\).
+
+Method B: Local Automated Exploitation with RsaCtfTool
+
+The gold-standard terminal tool for automated RSA attacks is RsaCtfTool. It automatically analyzes your public key file, checks for small exponents, tests small moduli, and runs lookups simultaneously.
+bash
+# 1. Clone and install dependencies
+git clone https://github.com
+cd RsaCtfTool && pip3 install -r requirements.txt
+
+# 2. Attack and decrypt using the public key file
+./RsaCtfTool.py --publickey public.pem --uncipherfile ciphertext.bin
+Use code with caution.
+
+🐍 Method 4: Rebuilding the Private Key from Factored Primes
+
+Once a small modulus is factored into \(p\) and \(q\), you can generate the private key exponent \(d\) and decrypt the file directly from your terminal string:
+bash
+python3 -c "
+p = 135757                  # Your recovered prime p
+q = 263489                  # Your recovered prime q
+e = 65537                   # The public exponent
+c = 1938210493              # The target ciphertext integer
+
+# Calculate Euler's totient
+phi = (p - 1) * (q - 1)
+
+# Calculate private key exponent d (modular multiplicative inverse)
+d = pow(e, -1, phi)
+n = p * q
+
+# Decrypt
+m = pow(c, d, n)
+print(f'Decrypted message int: {m}')
+"
+Use code with caution.
+
+🛡️ Modern Mitigation Strategies
+
+To ensure your public keys are completely secure against exponent and modulus collapse during architecture audits, verify the following properties:
+• Modulus Size: Enforce a minimum size of RSA 2048-bit or 4096-bit lengths.
+• Standard Exponent: Always use the industry standard value of e = 65537 (\(2^{16}+1\)). It is large enough to completely neutralize cube-root and broadcast attacks, while its binary structure (0x10001) still allows highly efficient mathematical squaring operations.
+• Mandate OAEP Padding: Always wrap plaintexts using Optimal Asymmetric Encryption Padding (RSA-OAEP) rather than legacy PKCS#1 v1.5 or raw "textbook" RSA. OAEP adds randomized structural elements that make the ciphertext completely mathematically distinct, even if the same message is sent multiple times.
