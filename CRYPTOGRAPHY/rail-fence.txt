@@ -1,1 +1,83 @@
 
+🚀 Method 1: Automated Cracking Without a Key (Fastest)
+
+If you do not know how many rails were used, use ciphey. It uses natural language processing to automatically detect the cipher type, brute-force the keys, and instantly print the answer.
+
+Step 1: Install the tool
+
+bash
+pip install ciphey
+Use code with caution.
+
+Step 2: Run the auto-decoder
+
+bash
+ciphey -t "HloWrdel ol!"
+Use code with caution.
+
+🐍 Method 2: Python Scripting (Brute-Force or Decrypt with Key)
+
+Because a Rail-Fence cipher rarely uses more than 10 or 20 rails before becoming impractical, running a Python one-liner to print every likely row layout is highly reliable.
+
+1. If you know the number of rails (e.g., 3 rails)
+
+Copy and paste this Python 3 one-liner into your terminal. Change rails = 3 and the cipher string to match your puzzle.
+bash
+python3 -c "
+cipher = 'HloWrdel ol!'
+rails = 3
+fence = [[None] * len(cipher) for _ in range(rails)]
+rail, direction = 0, 1
+for i in range(len(cipher)):
+    fence[rail][i] = '*'
+    rail += direction
+    if rail == 0 or rail == rails - 1: direction *= -1
+idx = 0
+for r in range(rails):
+    for c in range(len(cipher)):
+        if fence[r][c] == '*' and idx < len(cipher):
+            fence[r][c] = cipher[idx]
+            idx += 1
+rail, direction = 0, 1
+plaintext = []
+for i in range(len(cipher)):
+    plaintext.append(fence[rail][i])
+    rail += direction
+    if rail == 0 or rail == rails - 1: direction *= -1
+print(''.join(plaintext))
+"
+Use code with caution.
+Output: Hello World!
+
+2. If you do not know the number of rails
+
+Run this terminal one-liner to dump every configuration from 2 to 10 rails simultaneously. Read through the output to spot the legible English line.
+bash
+python3 -c "
+c = 'HloWrdel ol!'
+for rls in range(2, 11):
+    f = [[None]*len(c) for _ in range(rls)]; r, d = 0, 1
+    for i in range(len(c)): f[r][i] = '*'; r += d; d *= -1 if r==0 or r==rls-1 else 1
+    idx = 0
+    for r in range(rls):
+        for col in range(len(c)):
+            if f[r][col] == '*' and idx < len(c): f[r][col] = c[idx]; idx += 1
+    r, d = 0, 1; p = []
+    for i in range(len(c)): p.append(f[r][i]); r += d; d *= -1 if r==0 or r==rls-1 else 1
+    print(f'Rails {rls:02d}: ' + ''.join(p))
+"
+Use code with caution.
+
+🪟 Method 3: Native Windows PowerShell (When You Have the Key)
+
+If you are on a Windows terminal without Python, you can drop this code block directly into PowerShell to unpack a message when you know the number of rails.
+powershell
+$cipher = "HloWrdel ol!"; $rails = 3; $len = $cipher.Length
+$matrix = New-Object 'object[,]' $rails, $len; $rail = 0; $dir = 1
+for ($i = 0; $i -lt $len; $i++) { $matrix[$rail, $i] = '*'; $rail += $dir; if ($rail -eq 0 -or $rail -eq $rails - 1) { $dir *= -1 } }
+$idx = 0
+for ($r = 0; $r -lt $rails; $r++) { for ($c = 0; $c -lt $len; $c++) { if ($matrix[$r, $c] -eq '*' -and $idx -lt $len) { $matrix[$r, $c] = $cipher[$idx]; $idx++ } } }
+$rail = 0; $dir = 1; $plain = ""
+for ($i = 0; $i -lt $len; $i++) { $plain += $matrix[$rail, $i]; $rail += $dir; if ($rail -eq 0 -or $rail -eq $rails - 1) { $dir *= -1 } }
+Write-Host $plain
+Use code with caution.
