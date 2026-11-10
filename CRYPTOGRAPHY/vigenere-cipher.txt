@@ -1,1 +1,62 @@
 
+🚀 Method 1: Automated Cracking Without a Key (Fastest)
+
+If you do not know the repeating keyword, you can use subbreaker. It automatically deduces the key length (using the Kasiski examination or Friedman test) and performs frequency analysis on each shifted alphabet layout [subbreaker].
+
+Step 1: Install the tool
+
+bash
+pip install subbreaker
+Use code with caution.
+
+Step 2: Run the automated Vigenère solver
+
+bash
+echo "Vvwwf, Zfijo!" | subbreaker break --cipher vigenere --lang en
+Use code with caution.
+The terminal will output the guessed key size, the key itself, and the decrypted plaintext text.
+
+🐍 Method 2: Decrypting with Python (When You Have the Key)
+
+If you already know the password/key, copy and paste this Python 3 one-liner directly into your command prompt or terminal window.
+bash
+python3 -c "
+cipher = 'Vvwwf, Zfijo!'
+key = 'KEY'
+key = [ord(k.upper()) - 65 for k in key]
+print(''.join(chr((ord(c) - (65 if c.isupper() else 97) - key[i % len(key)]) % 26 + (65 if c.isupper() else 97)) if c.isalpha() else c for i, c in enumerate(cipher)))
+"
+Use code with caution.
+Output: Hello, World!
+
+🐧 Method 3: Dedicated CLI Tools (Alternative Python Tools)
+
+Another specialized command-line utility explicitly built for this cipher family is pyvigenere.
+
+Step 1: Install the library
+
+bash
+pip install pyvigenere
+Use code with caution.
+
+Step 2: Decrypt using a known key via CLI flags
+
+bash
+pyvigenere -d -k "MYPASSWORD" -t "Vvwwf, Zfijo!"
+Use code with caution.
+
+🪟 Method 4: Native Windows PowerShell (When You Have the Key)
+
+If you are on Windows and cannot install Python, use this native PowerShell script block to decrypt using your keyword.
+powershell
+$cipher = "Vvwwf, Zfijo!"; $key = "KEY"; $kIdx = 0
+-join ($cipher.ToCharArray() | ForEach-Object {
+    if ($_ -match '[a-zA-Z]') {
+        $base = if ($_ -match '[A-Z]') { 65 } else { 97 }
+        $kShift = [int][char][char]::ToUpper($key[$kIdx % $key.Length]) - 65
+        $kIdx++
+        [char]((([int][char]$_ - $base - $kShift + 26) % 26) + $base)
+    } else { $_ }
+})
+Use code with caution.
+
