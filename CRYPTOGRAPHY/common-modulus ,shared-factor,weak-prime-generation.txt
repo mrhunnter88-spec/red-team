@@ -1,1 +1,107 @@
 
+📡 Attack 1: Common Modulus Attack (Shared \(N\), Different \(e\))
+
+If an organization encrypts and sends the exact same message \(m\) to two different recipients who share the same modulus \(N\) but use different public exponents (\(e_{1}\) and \(e_{2}\)), an attacker can recover the message without factoring \(N\).
+As long as the two exponents are coprime (\(\gcd(e_1, e_2) = 1\)), Bézout's identity states that there exist two integers \(a\) and \(b\) such that \(a \cdot e_1 + b \cdot e_2 = 1\). By raising the two captured ciphertexts (\(c_{1}\) and \(c_{2}\)) to these powers, the message leaks.
+
+Run the Common Modulus Solver via Python
+
+Copy and paste this terminal script, supplying the shared modulus, the two unique exponents, and the two ciphertexts:
+python
+# Save as common_modulus.py or execute in python3
+import math
+
+def extended_gcd(a, b):
+    if a == 0: return b, 0, 1
+    gcd, x1, y1 = extended_gcd(b % a, a)
+    x = y1 - (b // a) * x1
+    y = x1
+    return gcd, x, y
+
+N = 0xabcdef... # The SHARED Modulus
+e1 = 65537
+e2 = 65535      # Example coprime exponent
+c1 = 0x111111... # Ciphertext 1
+c2 = 0x222222... # Ciphertext 2
+
+gcd, a, b = extended_gcd(e1, e2)
+
+# Handle negative coefficients using modular inverse
+if a < 0:
+    c1 = pow(c1, -1, N)
+    a = -a
+if b < 0:
+    c2 = pow(c2, -1, N)
+    b = -b
+
+# Reconstruct the plaintext integer
+m = (pow(c1, a, N) * pow(c2, b, N)) % N
+print(f"Decrypted Integer: {m}")
+print(f"Plaintext String: {bytes.fromhex(hex(m)[2:]).decode(errors='ignore')}")
+Use code with caution.
+
+👯 Attack 2: Shared Factor / Batch GCD Attack (Shared Primes)
+
+If two different RSA moduli (\(N_1 = p \cdot q_1\) and \(N_2 = p \cdot q_2\)) happen to share a single prime factor (\(p\)) due to a flawed or unseeded random number generator at startup, both keys are instantly broken.
+Finding a single prime factor of a single 2048-bit number is practically impossible. However, finding the Great Common Divisor (\(\gcd \)) of two large numbers takes less than a millisecond using Euclid's algorithm.
+
+Method A: Two-Key Instant \(\gcd \) Extraction
+
+If you suspect two public keys share a prime, extract their \(N\) parameters and find their common divisor:
+bash
+python3 -c "
+import math
+N1 = 0xaaaaa... # Modulus from Key 1
+N2 = 0xbbbbb... # Modulus from Key 2
+
+p = math.gcd(N1, N2)
+
+if p > 1 and p != N1:
+    q1 = N1 // p
+    q2 = N2 // p
+    print(f'🎯 Shared Prime p Found: {p}')
+    print(f'Key 1 Prime q1: {q1}')
+    print(f'Key 2 Prime q2: {q2}')
+else:
+    print('No shared factors between these two specific keys.')
+"
+Use code with caution.
+
+Method B: Large-Scale Network Audits via RsaCtfTool
+
+If you have gathered hundreds of public certificates from an internal network scan and want to check if any of them share prime factors, let RsaCtfTool build a product matrix over the entire batch automatically:
+bash
+# Place all collected public keys (.pem) into a single directory
+./RsaCtfTool.py --dump-all --key *.pem --attack batch_gcd
+Use code with caution.
+
+📉 Attack 3: Weak Prime Generation (ROCA & Wiener's)
+
+Weak prime generation occurs when an encryption engine restricts how its primes are picked, reducing the computational space required to find them.
+
+1. The ROCA Attack (Infineon Library Vulnerability)
+
+Famous firmware flaws (like the ROCA vulnerability) generated primes \(p\) using a strict mathematical structure: \(p = k \cdot M + (65537^a \pmod M)\), where \(M\) is the product of the first several consecutive primes. This allows an attacker to factor a 2048-bit modulus in a fraction of the time.
+You can verify and extract keys vulnerable to ROCA from the terminal using the automated toolkit:
+bash
+# Test a public key file specifically for the ROCA structural pattern
+./RsaCtfTool.py --publickey weak_hardware.pem --attack roca
+Use code with caution.
+
+2. Wiener's Attack (Small Private Exponent \(d\))
+
+If a developer attempts to speed up decryption times by intentionally choosing a very small private exponent \(d\) (\(d < \frac{1}{3}N^{\frac{1}{4}}\)), an attacker can use Continued Fractions to calculate the fraction components \(\frac{k}{d}\) directly from the public parameters \((N, e)\).
+bash
+# Execute Wiener's continued fraction expansion attack to recover a small d
+./RsaCtfTool.py --publickey small_d_key.pem --attack wieners
+Use code with caution.
+
+🛡️ Secure Infrastructure Audit Checklist
+
+To completely eradicate these architectural generator flaws across your environments, enforce these standard parameters from your CLI configurations:
+• Enforce Independent Moduli: Never share an RSA modulus (\(N\)) between multiple infrastructure components, users, or endpoints, even if they use completely distinct public/private exponents.
+• Verify System Entropy Pools: Ensure embedded hardware components, containers, and IoT devices have sufficient environmental entropy (/dev/urandom) seeded before generating keys. Check current entropy availability on Linux via:bash
+cat /proc/sys/kernel/random/entropy_avail
+Use code with caution.
+(A healthy pool should ideally register close to 256 or higher depending on the kernel version).
+
