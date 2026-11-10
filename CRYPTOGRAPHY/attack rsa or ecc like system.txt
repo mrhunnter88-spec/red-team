@@ -1,1 +1,82 @@
 
+🧮 1. Attacking RSA Configurations
+
+The foundation of RSA relies on the difficulty of factoring a large modulus \(N\) into its prime components \(p\) and \(q\). If these primes are chosen poorly, the trapdoor collapses.
+
+Method A: Automated Public Key Cracking with RsaCtfTool
+
+The gold-standard terminal environment for attacking flawed RSA public keys is RsaCtfTool. It ingests a standard .pem public key or certificate, automatically analyzes its structural components, and executes dozens of mathematical attacks (such as Wiener’s small private exponent attack, Fermat's factorization for close primes, and ROCA checks) simultaneously.
+bash
+# 1. Clone the automated framework
+git clone https://github.com
+cd RsaCtfTool && pip3 install -r requirements.txt
+
+# 2. Run the tool against a target public key file to recover the private key
+./RsaCtfTool.py --publickey target_public_key.pem --private
+Use code with caution.
+
+Method B: Exploiting Bleichenbacher's Padding Oracles (BB'98)
+
+If a decryption endpoint processes RSA ciphertext wrapped in legacy PKCS#1 v1.5 padding and returns distinct error structures (or timing differences) for valid versus invalid padding states, you can completely decrypt payloads without knowing the key.
+You can automate this interactively via network exploitation scripts or map out the responses to confirm the oracle leak:
+bash
+# Execute a parallelized Bleichenbacher padding attack to decrypt a raw block file
+./RsaCtfTool.py --publickey server_pub.pem --uncipherfile encrypted_flag.bin --attack bleichenbacher_98
+Use code with caution.
+
+📐 2. Attacking ECC (Elliptic Curve Cryptography) Configurations
+
+ECC relies on the Elliptic Curve Discrete Logarithm Problem (ECDLP). Attacks generally focus on forcing curve operations into weak mathematical subgroups or exploiting reused random states.
+
+Method A: Solving the ECDLP for Weak/Toy Curves via SageMath
+
+If a custom curve setup utilizes a tiny prime field or has an insecure order (e.g., smooth curve orders factorable into very small numbers), you can break the private key \(d\) from the public key point \(Q = d \cdot G\) using Pohlig-Hellman or the Baby-step Giant-step algorithm inside SageMath.
+python
+# Run this inside a SageMath terminal (sage)
+
+# 1. Define a toy-sized Elliptic Curve over a small prime field
+p = 1000003
+A = 2
+B = 3
+E = EllipticCurve(GF(p), [A, B])
+
+# 2. Define the public parameters (Generator point G and Public key point Q)
+G = E(452908, 937402)
+Q = E(219084, 110943) # Q = d * G
+
+# 3. Solve the discrete logarithm instantly using Sage's optimized solvers
+try:
+    recovered_private_key_d = G.discrete_log(Q)
+    print(f"🎯 Master Private Key Recovered: {recovered_private_key_d}")
+except ValueError:
+    print("Point is not in the same subgroup or curve order is secure.")
+Use code with caution.
+
+Method B: Recovering Private Keys via ECDSA Nonce Reuse
+
+As highlighted under signature misuse, if a system ever signs two different data payloads using the exact same random nonce value (\(k\)), the elliptic curve \(x\)-coordinate projection (\(r\)) locks into an identical state. You can extract the private key via plain arithmetic over your shell:
+bash
+# Capture and check your transaction data logs for repeating 'r' string parameters
+cat application_signatures.log | awk '{print $1}' | sort | uniq -c | sort -nr
+Use code with caution.
+(Any count greater than 1 indicates a total key exposure, allowing immediate calculation of the private key \(d\)).
+
+🕵️ 3. Auditing Public Key Infrastructure (PKI) via CLI
+
+You can proactively detect implementation flaws, outdated protocols, or insecure parameter dimensions across your systems using native network scanning utilities.
+
+Check live SSL/TLS services for weak public key configurations:
+
+bash
+# Analyze a live remote domain's handshake to check bit-lengths and signature suites
+openssl s_client -connect target-server.local:443 -status < /dev/null 2>&1 | openssl x509 -text -noout | grep -E "Public-Key|Signature Algorithm"
+Use code with caution.
+• Vulnerable Baseline: Look for RSA Public-Key: (1024 bit) or signatures leveraging md5WithRSAEncryption / sha1WithRSAEncryption. These parameters indicate keys exposed to mathematical or collision-based breakdown.
+• Secure Baseline: Look for RSA Public-Key: (2048 bit) (or higher), or elliptic curve parameters tracking standard prime curves like ASN1 OID: prime256v1 (NIST P-256) or X25519.
+
+🛡️ Core Defensive Countermeasures
+
+To fully protect asymmetric cryptosystems against systemic attacks during code architecture reviews:
+1. Mandate RSA-OAEP Padding: Completely ban "textbook" RSA and legacy PKCS#1 v1.5 padding models. Enforce Optimal Asymmetric Encryption Padding (RSA-OAEP), which mathematically neutralizes padding oracle loops by randomizing structural blocks.
+2. Enforce Twist-Secure and Prime-Order Curves: In ECC deployments, phase out custom or unverified curve definitions. Rely on standard prime-order curves (where the cofactor is exactly 1, preventing subgroup confinement attacks) or twist-secure variants like Curve25519.
+3. Double-Check Cryptographic Signatures: Before writing signed keys or tokens to a public network socket, force the application layer to verify the output signature mathematically. If the verification fails due to internal computation errors or physical fault glitches, immediately drop the operation block to prevent data leakage.
