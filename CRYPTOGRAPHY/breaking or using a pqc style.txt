@@ -1,1 +1,97 @@
 
+📦 Method 1: Generating Keys and Encrypting via OpenSSL 3.4+
+
+The standard method for using PQC from your terminal is through modern versions of OpenSSL or the Open Quantum Safe (OQS) provider plugin (liboqs).
+
+Step 1: Check for PQC Algorithm Support
+
+Run this command to see if your terminal's OpenSSL installation supports the standardized post-quantum algorithms:
+bash
+openssl list -kem-algorithms | grep -E "bkyber|mlkem"
+openssl list -signature-algorithms | grep -E "bdilithium|mldsa"
+Use code with caution.
+
+Step 2: Generate an ML-KEM-768 Private Key File
+
+ML-KEM-768 provides Security Category 3 (equivalent to AES-192) and is the recommended baseline standard.
+bash
+openssl pkeykeygen -algorithm mlkem768 -out pqc_private.pem
+Use code with caution.
+
+Step 3: Extract the Corresponding Public Key
+
+bash
+openssl pkey -in pqc_private.pem -pubout -out pqc_public.pem
+Use code with caution.
+
+🐍 Method 2: Scripting PQC Operations inside Python
+
+If your system's native OpenSSL binary lacks compiled PQC wrappers, you can implement public key generation, encapsulation, and decapsulation via the command line using the official pyoqs bindings.
+
+Step 1: Install the Open Quantum Safe Python Bindings
+
+bash
+pip install pyoqs
+Use code with caution.
+
+Step 2: Run a Complete ML-KEM Exchange Script
+
+Copy and paste this terminal script to simulate a secure post-quantum key encapsulation exchange:
+python
+# Save as mlkem_exchange.py or run via python3
+import oqs
+
+# 1. Initialize the ML-KEM-768 engine (Standard production parameters)
+kem_name = "ML-KEM-768"
+with oqs.KeyEncapsulation(kem_name) as client_kem:
+    print(f"✨ {kem_name} engine loaded successfully.")
+    
+    # 2. CLIENT: Generate public/private keypair
+    public_key = client_kem.generate_keypair()
+    print("🔒 Client public key generated.")
+
+# 3. SERVER: Encapsulate a secret key using the client's public key
+with oqs.KeyEncapsulation(kem_name) as server_kem:
+    ciphertext, shared_secret_server = server_kem.encap_secret(public_key)
+    print("📦 Server generated a shared secret and encapsulated it into ciphertext.")
+
+# 4. CLIENT: Decapsulate the ciphertext using the client's private key
+with oqs.KeyEncapsulation(kem_name) as client_decoder:
+    # (In a real application, the private key state is maintained)
+    shared_secret_client = client_kem.decap_secret(ciphertext)
+
+# 5. Verify the key agreement match
+if shared_secret_server == shared_secret_client:
+    print("🎯 Success! Post-Quantum shared secret matching perfectly.")
+    print(f"Derived AES-ready key stream (Hex): {shared_secret_client.hex()}")
+Use code with caution.
+
+🕵️ Method 3: Auditing Protocols for PQC Implementation Misuse
+
+While the underlying mathematics of ML-KEM and ML-DSA are robust against direct cryptanalysis, attackers can target vulnerabilities introduced by bad coding practices or improper protocol integration.
+
+1. Checking for Shared Secret Re-use (Static-Static ECDH Misuse)
+
+ML-KEM is explicitly designed to be ephemeral. If a developer caches the public key and uses it statically over thousands of network connections to save processing overhead, the system loses its Forward Secrecy.
+You can audit a live server application's TLS handshakes to ensure it rotates keys dynamically:
+bash
+# Force a TLS connection and filter to verify that a fresh PQC key exchange is chosen
+openssl s_client -connect target-server.local:443 -groups mlkem768:x25519 -tls1_3
+Use code with caution.
+• Secure Pattern: Look for Hybrid Key Exchange parameters (like mlkem768_x25519). This combines classical Curve25519 with Post-Quantum ML-KEM. If either algorithm contains a hidden software bug, the other layer still maintains total confidentiality.
+
+2. Evaluating Drop-in Fragility (Decapsulation Failure Leaks)
+
+If a software engineer attempts to patch an old RSA codebase by swapping it for ML-KEM without modifying the input error parsing logic, they risk creating side-channel vulnerabilities.
+If an attacker modifies a byte of an ML-KEM ciphertext block, the algorithm's internal Fujisaki-Okamoto (FO) transform will catch the manipulation and output a pseudo-random dummy key string instead of throwing a standard error message.
+If the application logs a custom warning or behaves differently when processing a fake key versus a corrupted decryption payload, it creates a behavioral side-channel. This allows an attacker to slowly map out key structures using a Decapsulation Failure Attack.
+
+🛡️ Post-Quantum Migration Strategy Checklist
+
+When auditing enterprise infrastructure architectures from your console to transition them away from legacy RSA/ECC to PQC standards, enforce this verification pipeline:
+• Implement Hybrid Modes First: Do not rely exclusively on PQC algorithms. Ensure your configurations mandate hybrid key exchanges (e.g., X25519 + ML-KEM-768). This protects your data against unexpected classical implementation flaws while securing it against future quantum computer decryption.
+• Update Signature Field Buffer Allocations: Ensure network parsing buffers can accommodate large key structures.
+	• RSA-2048 Public Key: ~256 bytes.
+	• ML-DSA-65 (Dilithium3) Public Key: 1,952 bytes (with a signature size of 3,309 bytes).
+	• Failing to widen buffer allocations across load balancers or firewalls before deploying ML-DSA signatures will cause immediate packet drops or memory fragmentation crashes.
+
