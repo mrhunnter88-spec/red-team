@@ -1,1 +1,105 @@
 
+📦 1. Base64 Encoding
+
+Base64 uses 64 characters (A-Z, a-z, 0-9, +, /) and often ends with = or == padding characters to ensure the byte blocks align perfectly.
+• Linux & macOS (Terminal):bash
+# Encode text to Base64
+echo -n "Hello World!" | base64
+# Output: SGVsbG8gV29ybGQh
+
+# Decode Base64 string
+echo "SGVsbG8gV29ybGQh" | base64 -d
+# Note: On some legacy macOS versions, use 'base64 -D' or 'base64 --decode'
+Use code with caution.
+• Windows (PowerShell):powershell
+# Encode
+[Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("Hello World!"))
+# Decode
+[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("SGVsbG8gV29ybGQh"))
+Use code with caution.
+
+🔢 2. Base32 Encoding
+
+Base32 uses a 32-character alphabet (usually A-Z and digits 2-7), making it case-insensitive and safe for file systems or human entry (like Google Authenticator 2FA secret seeds).
+• Linux (Terminal):bash
+# Encode text to Base32
+echo -n "Hello World!" | base32
+# Output: JBSWY3DPEBLW64TMMQQQ====
+
+# Decode Base32 string
+echo "JBSWY3DPEBLW64TMMQQQ====" | base32 -d
+Use code with caution.
+• Cross-Platform Python One-Liner:bash
+python3 -c "import base64; print(base64.b32decode('JBSWY3DPEBLW64TMMQQQ====').decode())"
+Use code with caution.
+
+🔤 3. Base16 / Hex Encoding
+
+Hexadecimal encoding maps each raw byte to two characters using a base of 16 digits (0-9 and a-f). It is heavily used to print raw cryptographic keys, hashes, and binary files.
+• Linux & macOS (Terminal):bash
+# Encode text to Hex using xxd
+echo -n "Hello World!" | xxd -p
+# Output: 48656c6c6f20576f726c6421
+
+# Decode Hex string back to plaintext
+echo "48656c6c6f20576f726c6421" | xxd -r -p
+Use code with caution.
+• Alternative tool (od / tr for pure text formatting):bash
+# Encode using od
+echo -n "Hello World!" | od -An -tx1 | tr -d ' \n'
+Use code with caution.
+
+🌐 4. URL Encoding (Percent Encoding)
+
+URL encoding replaces non-alphanumeric text characters with a % followed by their corresponding two-digit hexadecimal representation (e.g., a space character becomes %20). This makes input parameters safe for web browsers and HTTP queries.
+• Bash/Zsh Built-in Shell Decoding:bash
+# Fast Terminal Decoding using printf
+printf '%b\n' "${INPUT_STRING//%/\\x}"
+# Example:
+printf '%b\n' "Hello%20World%21"
+# Output: Hello World!
+Use code with caution.
+• Python Universal Command-Line Tool:bash
+# URL Encode a text string
+python3 -c "import urllib.parse; print(urllib.parse.quote('Hello World!'))"
+# Output: Hello%20World%21
+
+# URL Decode a text string
+python3 -c "import urllib.parse; print(urllib.parse.urlsearch_decode or urllib.parse.unquote('Hello%20World%21'))"
+Use code with caution.
+
+📧 5. UUencoding (Unix-to-Unix Encoding)
+
+UUencoding is a legacy format historically used on early Unix systems to encode binary files over text-only UUCP email relays. It encodes data 3 bytes at a time into 4 printable ASCII characters, and lines traditionally begin with an explicit length marker character.
+• Linux & macOS (Terminal Utilities):bash
+# Install sharp utilities if missing (sudo apt install sharutils)
+
+# Encode a text stream (Requires giving it a temporary file designation name)
+echo "Hello World!" | uuencode dummy_filename.txt
+# Output:
+# begin 644 dummy_filename.txt
+# +265L;&\space5V]R;&0I
+# `
+# end
+
+# Decode a UUencoded payload back into a text file
+uudecode -o - << 'EOF'
+begin 644 dummy_filename.txt
++265L;&\space5V]R;&0I
+`
+end
+EOF
+# Output: Hello World!
+Use code with caution.
+
+🔍 How to Instantly Identify the Encoding Format
+
+If you encounter an anonymous string in a CTF or code review, use these physical visual markers to figure out the encoding schema:
+
+Format	Alphabet Used	Visual Characteristics / Identifiers
+Base64	A-Z, a-z, 0-9, +, /	Case-sensitive mixes. Frequently padded with = or == at the end.
+Base32	A-Z, 2-7	Entirely uppercase letters. No numbers 0, 1, 8, 9. Heavily padded with multiple = blocks.
+Hex (Base16)	0-9, a-f (or uppercase)	Only numbers and the first six letters of the alphabet. Even-numbered string counts.
+URL Encoding	% followed by Hex pairs	Dotted with %20, %3F, %26, or + signs.
+UUencoding	Printable ASCII characters	Begins with a header block like begin 644 [filename], followed by lines starting with standard punctuation characters.
+
