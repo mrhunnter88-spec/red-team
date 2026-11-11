@@ -1,1 +1,106 @@
 
+🛠️ The File Reconstruction Logic
+
+1. Reassemble TCP Flow Bytes: Group packets by connection tuple and sort them strictly by sequence number to form a contiguous byte stream.
+2. Locate Application Framing: Identify where the file transfer actually starts. For instance, in an HTTP response, skip past the text headers (\r\n\r\n) to find the raw binary payload.
+3. Snoop File Magic Bytes: Look at the beginning of the extracted payload to find its true file format magic bytes (e.g., \x89PNG).
+4. Carve and Save: Extract the exact binary length of the file data and write it to disk.
+
+🐍 Python Code Implementation: Network File Carver
+
+The script below extracts raw TCP streams, removes protocol overhead, locates valid image or document headers, and carves out the files onto your hard drive.
+python
+# pip install scapy
+import os
+import re
+from scapy.all import rdpcap, TCP, IP
+
+# Common binary file signature patterns to detect inside the network data
+FILE_SIGNATURES = {
+    "png": {"start": b"\x89PNG\r\n\x1a\n", "end": b"IEND\xaeB`\x82"},
+    "jpg": {"start": b"\xff\xd8\xff", "end": b"\xff\xd9"},
+    "pdf": {"start": b"%PDF-", "end": b"%%EOF"}
+}
+
+def carve_files_from_pcap(pcap_path: str, output_dir: str = "./carved_output"):
+    """
+    Groups raw packets into sequential TCP streams, detects embedded 
+    file headers, and carves complete images or documents out to disk.
+    """
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    print(f"📦 Loading packet capture for file extraction: {pcap_path}")
+    try:
+        packets = rdpcap(pcap_path)
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return
+
+    # Map to store assembled network flows
+    # Key: (src_ip, src_port, dst_ip, dst_port), Value: List of (seq, payload)
+    streams = {}
+
+    for pkt in packets:
+        if pkt.haslayer(IP) and pkt.haslayer(TCP):
+            ip_layer = pkt[IP]
+            tcp_layer = pkt[TCP]
+            payload = bytes(tcp_layer.payload)
+            
+            if payload:
+                flow_key = (ip_layer.src, tcp_layer.sport, ip_layer.dst, tcp_layer.dport)
+                if flow_key not in streams:
+                    streams[flow_key] = []
+                streams[flow_key].append((tcp_layer.seq, payload))
+
+    print(f"🧵 Reassembling {len(streams)} distinct network flows...")
+    file_counter = 0
+
+    for flow, segments in streams.items():
+        # Step 1: Re-order chunks by TCP sequence number to remove transport fragmentation
+        segments.sort(key=lambda x: x[0])
+        full_stream_bytes = b"".join([payload for _, payload in segments])
+
+        # Step 2: Scan the stream for known file signatures
+        for ext, magic in FILE_SIGNATURES.items():
+            start_idx = full_stream_bytes.find(magic["start"])
+            
+            if start_idx != -1:
+                # Find the corresponding end-of-file structural marker
+                end_idx = full_stream_bytes.find(magic["end"], start_idx)
+                
+                if end_idx != -1:
+                    # Calculate true file end boundary including the length of the footer marker
+                    actual_end = end_idx + len(magic["end"])
+                    file_data = full_stream_bytes[start_idx:actual_end]
+                    
+                    file_counter += 1
+                    output_file = os.path.join(output_dir, f"extracted_file_{file_counter}.{ext}")
+                    
+                    # Step 3: Write the reconstructed binary object to disk
+                    with open(output_file, "wb") as f:
+                        f.write(file_data)
+                        
+                    print(f"🎯 Successfully carved .{ext} ({len(file_data)} bytes) from stream {flow[0]} -> {output_file}")
+
+    print(f"🧹 Extraction complete. Total files recovered: {file_counter}")
+
+# --- Example Call ---
+# carve_files_from_pcap("file_transfer_session.pcap")
+Use code with caution.
+
+⚡ Rapid Extraction: Automated Object Carving tools
+
+If you are handling complex protocols like HTTP chunked encoding, multi-part forms, or compression (gzip/brotli web compression) inside the network stream, basic byte matching will miss files. Use these highly resilient automation options:
+
+Option 1: NetworkMiner (GUI Tool)
+
+If you prefer a visual interface, open your PCAP in NetworkMiner (Windows/Linux via Mono). It automatically processes all TCP frames, handles decompression, parses file systems, and extracts a clean list of all images, files, and credentials into an organized directory structure.
+
+Option 2: The foremost Command Line Tool
+
+Foremost is a console program that recovers files based on their headers, footers, and internal structures. It can parse raw data dumps or entire PCAPs natively:
+bash
+# Ingests a raw PCAP stream and dumps all reconstructed images/PDFs into an output directory
+foremost -i packet_capture.pcap -o ./carved_files/
+Use code with caution.
