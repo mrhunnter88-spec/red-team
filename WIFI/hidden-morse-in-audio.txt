@@ -1,1 +1,125 @@
 
+
+🎨 The Three Dominant Hiding Methodologies
+
+To detect or extract hidden Morse code, auditors analyze the file for three common injection techniques:
+
+Hiding Technique	How it Works	Detection Vectors
+High/Low Frequency Isolation	The Morse code is generated at a frequency that sits right at or outside the boundaries of human hearing (e.g., a sharp 18 kHz to 20 kHz ultrasonic tone).	Isolating high-frequency bands using band-pass filters.
+Spectrogram Image Drawing	Software transforms the text dots and dashes into a visual image file, then uses mathematical rendering tools (like Coagula) to print the text blocks directly into the frequency coordinates.	Opening the audio in a tool like Sonic Visualiser and rendering a Spectrogram Layer.
+Least Significant Bit (LSB) Injection	Instead of altering the sound waves directly, the script replaces the very last bit of every audio amplitude byte with the binary version of a Morse stream.	Extracting the binary array from raw byte streams mathematically.
+
+
+💻 Python Code: Ultrasonic / Frequency-Isolated Morse Extraction
+
+The following script models a forensic extraction pipeline. It assumes an audio file contains hidden Morse data tucked away in a dedicated high-frequency channel, mixed underneath a normal low-frequency audio tracking stream.
+The tool performs a Fast Fourier Transform (FFT), applies a High-Pass Filter to wipe away the primary audio track, tracks the amplitude of the hidden frequency, and extracts the characters.
+python
+import numpy as np
+
+def extract_hidden_ultrasonic_morse(audio_samples, sample_rate, target_hidden_freq=18000):
+    """
+    Forensic analysis tool that processes raw audio arrays, isolates a hidden 
+    high-frequency sub-band (steganographic layer), and checks for Morse code pulses.
+    """
+    num_samples = len(audio_samples)
+    print(f"[*] Analyzing {num_samples} audio samples at {sample_rate} Hz...")
+    
+    # 1. Transition to Frequency Domain via Fast Fourier Transform (FFT)
+    fft_data = np.fft.fft(audio_samples)
+    frequencies = np.fft.fftfreq(num_samples, d=1.0/sample_rate)
+    
+    # 2. High-Pass Filter Design: Wipe out all standard audible audio beneath 15 kHz
+    # This strips away music, voices, or background chatter acting as the cover camouflage.
+    filtered_fft = fft_data.copy()
+    filtered_fft[np.abs(frequencies) < 15000] = 0
+    
+    # 3. Reconstruct clean time-domain signal from filtered frequency matrix
+    cleaned_audio = np.fft.ifft(filtered_fft)
+    amplitude_envelope = np.abs(cleaned_audio)
+    
+    # 4. Binary Thresholding: Determine where the hidden high-frequency tone is active
+    # If the residual power climbs above a baseline, the hidden carrier is 'ON'
+    baseline_threshold = np.max(amplitude_envelope) * 0.3
+    binary_pulse_stream = (amplitude_envelope > baseline_threshold).astype(int)
+    
+    # 5. Segment/Pulse Length Parser Engine
+    # Measures the duration of sequential 1s (Tone ON) and 0s (Silence OFF)
+    state_runs = []
+    current_state = binary_pulse_stream[0]
+    current_length = 0
+    
+    for sample in binary_pulse_stream:
+        if sample == current_state:
+            current_length += 1
+        else:
+            state_runs.append((current_state, current_length))
+            current_state = sample
+            current_length = 1
+    state_runs.append((current_state, current_length))
+
+    # Determine an automated baseline chunk size (e.g., finding the shortest pulse length)
+    on_lengths = [length for state, length in state_runs if state == 1 and length > 5]
+    if not on_lengths:
+        return "[-] Analysis Failure: No steganographic high-frequency data pulse detected."
+    
+    base_unit = min(on_lengths) # Shorter duration maps to a standard Morse 'Dit'
+    
+    # Translate durations into clean structural Morse strings
+    morse_string_blocks = []
+    for state, length in state_runs:
+        normalized_units = round(length / base_unit)
+        
+        if state == 1: # Carrier ON
+            if normalized_units <= 2:
+                morse_string_blocks.append(".")
+            else:
+                morse_string_blocks.append("-")
+        else: # Silence OFF
+            if normalized_units == 3:
+                morse_string_blocks.append(" ") # Letter transition gap
+            elif normalized_units >= 7:
+                morse_string_blocks.append(" / ") # Word transition gap
+
+    raw_morse = "".join(morse_string_blocks).strip()
+    print(f"[+] Isolated Hidden Morse Pulse Structure: {raw_morse}")
+    return raw_morse
+
+if __name__ == "__main__":
+    # --- SIMULATE STEGANOGRAPHIC AUDIO FILE CREATION ---
+    FS = 44100  # Standard Studio Audio Sample Rate (44.1 kHz)
+    duration = 4.0 # 4 Seconds tracking index
+    t = np.linspace(0, duration, int(FS * duration), endpoint=False)
+    
+    # 1. Generate the camouflage cover audio layer (A low 300Hz audible tone mimicking voice/music)
+    cover_audio_track = np.sin(2 * np.pi * 300 * t)
+    
+    # 2. Inject a hidden high-frequency message layer at 18 kHz (Invisible to ears)
+    # Message pattern to encode: "A" ( . _ )
+    # Let's map sample windows for Dit (ON) -> Gap (OFF) -> Dah (ON)
+    hidden_carrier_envelope = np.zeros(len(t))
+    
+    dit_start, dit_end = int(FS * 0.5), int(FS * 0.7)    # 0.2s duration (1 Unit)
+    gap_start, gap_end = int(FS * 0.7), int(FS * 0.9)    # 0.2s duration (1 Unit)
+    dah_start, dah_end = int(FS * 0.9), int(FS * 1.5)    # 0.6s duration (3 Units)
+    
+    hidden_carrier_envelope[dit_start:dit_end] = 1.0
+    hidden_carrier_envelope[dah_start:dah_end] = 1.0
+    
+    # Synthesize the actual steganographic signal layer
+    stego_hidden_signal = hidden_carrier_envelope * np.sin(2 * np.pi * 18000 * t)
+    
+    # 3. Mix the layers together to generate a single composite file
+    mixed_forensic_audio = cover_audio_track + stego_hidden_signal
+    
+    # 4. Pass the combined file into the extraction pipeline to recover the hidden data
+    extract_hidden_ultrasonic_morse(mixed_forensic_audio, FS)
+Use code with caution.
+
+🛠️ Interactive Tool Validation (Manual Visual Analysis)
+
+If you are dealing with a target file where the Morse code has been drawn directly into a Spectrogram:
+1. Download and open Sonic Visualiser (industry standard forensic tool).
+2. Import the suspect .wav or .mp3 track.
+3. Click Pane \(\rightarrow \) Add Spectrogram (or use the shortcut Shift + G).
+4. Change the color configuration map to Green or Sunset and adjust the vertical frequency zoom. You will visually see blocks of dashes and dots floating directly in the upper kHz lines, completely bypassable via regular text searches.
