@@ -1,1 +1,95 @@
+o secure this, your backend must implement a recursive stream-parsing strategy that extracts files entirely in-memory, tracks directory traversal attempts (Zip Slip), and validates the headers of every single embedded object before saving them to disk.
+
+🛠️ Step-by-Step Validation Logic for Archives
+
+1. Limit Archive Decompression Size: Track the total uncompressed bytes across all files to prevent a Zip Bomb (Denial of Service).
+2. Sanitize Internal Paths: Strip out directory traversal tokens (../) to prevent a Zip Slip vulnerability.
+3. Stream and Sniff Magic Bytes: Without writing anything to disk, read the first few bytes of the internal file stream and compare them against your whitelist.
+4. Reject Mismatches: If invoice.pdf inside the zip actually contains the magic bytes of an executable (MZ), abort the entire extraction.
+
+🐍 Python Code Implementation
+
+The following script safely processes a .zip container, iterates over its internal structural headers, and validates the true file identity of its contents.
+python
+import io
+import os
+import zipfile
+from typing import Dict
+
+# Whitelist definition for embedded files
+VALID_SIGNATURES: Dict[str, bytes] = {
+    "pdf": b"%PDF-",
+    "png": b"\x89PNG\r\n\x1a\n",
+    "csv": b"",  # Plain text checks or alternative rules can be added here
+}
+
+# Mitigation limits
+MAX_UNCOMPRESSED_SIZE = 100 * 1024 * 1024  # 100 MB max aggregate size (Zip Bomb protection)
+MAX_FILE_COUNT = 500                      # Protect against overwhelming file counts
+
+def secure_validate_archive(zip_path: str) -> bool:
+    """
+    Opens an archive, extracts files in-memory, prevents Zip Slip/Bombs, 
+    and checks the structural magic bytes of every embedded file.
+    """
+    total_uncompressed_bytes = 0
+    file_count = 0
+
+    try:
+        if not zipfile.is_zipfile(zip_path):
+            print("❌ Outer container is not a valid ZIP archive.")
+            return False
+
+        with zipfile.ZipFile(zip_path, 'r') as archive:
+            # Step 1: Structural Audit of File Metadata
+            for info in archive.infolist():
+                file_count += 1
+                total_uncompressed_bytes += info.file_size
+
+                # Anti-Zip Bomb Guardrail
+                if total_uncompressed_bytes > MAX_UNCOMPRESSED_SIZE or file_count > MAX_FILE_COUNT:
+                    print("❌ Security Alert: Archive limits exceeded (potential Denial of Service).")
+                    return False
+
+                # Anti-Zip Slip Guardrail (Path Traversal Check)
+                normalized_path = os.path.normpath(info.filename)
+                if normalized_path.startswith("..") or info.filename.startswith("/"):
+                    print(f"❌ Security Alert: Path traversal attempt detected in filename: {info.filename}")
+                    return False
+
+                # Skip directories, check only files
+                if info.is_dir():
+                    continue
+
+                # Step 2: Extract & Snoop Embedded Headers In-Memory
+                expected_ext = info.filename.split('.')[-1].lower() if '.' in info.filename else ""
+                
+                if expected_ext not in VALID_SIGNATURES:
+                    print(f"❌ Rejected: Unsupported file extension '.{expected_ext}' inside archive ({info.filename}).")
+                    return False
+
+                # Read only the header slice from the zip stream without full extraction
+                with archive.open(info) as embedded_file:
+                    header_len = max(len(sig) for sig in VALID_SIGNATURES.values())
+                    embedded_header = embedded_file.read(header_len)
+                    
+                    expected_signature = VALID_SIGNATURES[expected_ext]
+                    
+                    # Step 3: Magic Byte Cross-Verification
+                    if not embedded_header.startswith(expected_signature):
+                        print(f"❌ Spoofing Detected! '{info.filename}' claims to be .{expected_ext} but header is mismatched.")
+                        return False
+
+        print("✅ Secure Archive Validation Passed: All internal headers and paths are legitimate.")
+        return True
+
+    except (zipfile.BadZipFile, IOError) as e:
+        print(f"❌ Malformed archive structure: {e}")
+        return False
+Use code with caution.
+
+🛡️ Production Hardening Strategies
+
+• Nested Archives (Recursive Checking): If an archive contains another archive (e.g., a .zip inside a .zip), modify the structure above to recursively pass the embedded byte stream into io.BytesIO() and call your check layer again up to a defined depth limit (e.g., max 3 levels deep).
+• Defensive Sandbox Extractions: In high-security environments, process the archive inside a locked-down scratch space or throwaway container to isolate your host operating system from low-level parser exploits in decompression engines (like zlib bugs).
 
