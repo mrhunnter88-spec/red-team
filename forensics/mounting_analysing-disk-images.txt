@@ -1,1 +1,104 @@
 
+🛠️ The Disk Analysis Logic
+
+1. Read the Partition Table: Identify the disk layout (e.g., MBR or GPT) to locate individual partition structures.
+2. Calculate Sector Offsets: Multiply the starting sector of a partition by the sector size (usually 512 bytes) to find the exact byte offset where the file system begins.
+3. Mount or Carve Safely: Mount the partition as a read-only loop device to protect the integrity of the evidence, or use specialized tools to inspect deleted file system journal nodes ($MFT or Inodes).
+
+🐍 Python Code Implementation: Programmatic Partition Offset Calculator
+
+Before mounting a disk image, you must identify its internal partitions. The following script uses pure Python to read a Master Boot Record (MBR) structure from a disk image and calculates the precise offsets needed to mount or extract files.
+python
+import struct
+
+def parse_mbr_partitions(disk_image_path: str):
+    """
+    Parses the Master Boot Record (MBR) structure of a raw disk image
+    to find partition types, starting sectors, and absolute byte offsets.
+    """
+    # MBR structure parameters
+    MBR_SIZE = 512
+    PARTITION_TABLE_OFFSET = 446
+    PARTITION_ENTRY_SIZE = 16
+    SECTOR_SIZE = 512  # Standard bytes per sector
+    
+    print(f"💾 Analyzing disk image structure: {disk_image_path}")
+    
+    try:
+        with open(disk_image_path, "rb") as f:
+            mbr_bytes = f.read(MBR_SIZE)
+            
+            # Step 1: Validate MBR Boot Signature
+            if mbr_bytes[510:512] != b"\x55\xaa":
+                print("❌ Invalid MBR structural signature! This might be a GPT disk or a single partition image.")
+                return
+
+            print("✅ Valid MBR structural signature found.")
+            
+            # Step 2: Iterate through the 4 primary partition slots
+            for i in range(4):
+                start = PARTITION_TABLE_OFFSET + (i * PARTITION_ENTRY_SIZE)
+                entry = mbr_bytes[start : start + PARTITION_ENTRY_SIZE]
+                
+                # Unpack MBR Partition Entry Structure:
+                # 1B (Status) + 3B (CHS Start) + 1B (Type) + 3B (CHS End) + 4B (LBA Start) + 4B (Total Sectors)
+                # Format string '<B3sB3sII': Little-endian
+                status, _, part_type, _, lba_start, total_sectors = struct.unpack("<B3sB3sII", entry)
+                
+                if total_sectors == 0:
+                    continue  # Unused partition slot
+                    
+                # Step 3: Calculate structural mathematical offsets
+                byte_offset = lba_start * SECTOR_SIZE
+                total_bytes = total_sectors * SECTOR_SIZE
+                
+                print(f"\n📦 Partition [{i+1}]:")
+                print(f"   • Bootable: {'Yes' if status == 0x80 else 'No'}")
+                print(f"   • Filesystem Hex Type: {hex(part_type)}")
+                print(f"   • Starting Sector (LBA): {lba_start}")
+                print(f"   • Absolute Byte Offset: {byte_offset} bytes")
+                print(f"   • Partition Size: {total_bytes / (1024**2):.2f} MB")
+                
+                # Pro-tip command generated based on parsed mathematical calculations:
+                print(f"   🛠️ Mount Command: mount -o ro,loop,offset={byte_offset} {disk_image_path} /mnt/target")
+
+    except IOError as e:
+        print(f"❌ Error reading disk image file: {e}")
+Use code with caution.
+
+🛡️ Industry-Standard Analysis & Mounting Workflows
+
+Writing code to manually parse advanced file system indices (like an NTFS Master File Table or ext4 block groups) is incredibly intensive. In real security and forensic operations, you leverage specialized system-level binary suites to mount or explore these environments safely.
+
+1. Safely Mounting Raw Disk Images (Linux)
+
+To inspect the files on your host system without modifying a single bit of evidence, use the losetup loop device management command combined with kpartx to map partition tables automatically:
+bash
+# Step A: Attach the disk image as a read-only loop device and automatically scan partitions
+sudo losetup -fP --read-only forensic_disk.img
+
+# Step B: View the newly mapped partition structures (e.g., /dev/loop0p1, /dev/loop0p2)
+lsblk
+
+# Step C: Mount a target partition to an empty directory to browse its files safely
+sudo mount -o ro /dev/loop0p1 /mnt/evidence/
+Use code with caution.
+
+2. Deep File System Auditing & Undeleting via The Sleuth Kit (TSK)
+
+If an attacker deleted a flag file or malware payload right before the disk image was captured, standard mounting will not show it. You can parse the file system structural data structures using The Sleuth Kit (TSK) via your terminal:
+bash
+# A. List the partition layouts and find their sector offsets
+mmls forensic_disk.img
+
+# B. List all files (including hidden and deleted items flagged with '*') in a partition
+# Replace '2048' with the starting sector found via mmls
+fls -r -o 2048 forensic_disk.img
+
+# C. Carve/Recover a specific deleted file using its File System Inode/MFT index number (e.g., inode 1422)
+icat -o 2048 forensic_disk.img 1422 > recovered_flag.png
+Use code with caution.
+
+3. Visual Analysis Option: Autopsy
+
+For deep forensic deep dives across multi-partition images, load your image file directly into Autopsy (an open-source forensic platform built on top of TSK). Autopsy automatically parses the partition tables, handles metadata indexing, extracts browser histories, highlights hidden registry structures, and pulls out deleted or unallocated space blocks into an accessible visual interface.
