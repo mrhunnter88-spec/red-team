@@ -1,1 +1,118 @@
 
+🎨 The Three Dominant RF Steganography Mechanisms
+
+To embed or detect data hidden in the physical properties of a radio wave, auditors analyze three primary injection techniques:
+
+Steganographic Vector	How it Works	Detection Vector
+Constellation Shifting (EVM Injection)	Modifying the precise phase or amplitude coordinates of a QAM/QPSK symbol by an microscopic, intentional offset value.	Monitoring anomalies in the Error Vector Magnitude (EVM) grid over time.
+Preamble Padding / CSI Camouflage	Hiding bits inside the Channel State Information (CSI) fields or padding bits of standard 802.11 management frames.	Checking for unusual data patterns or high entropy in unused fields.
+Thermal Noise Emulation	Modulating the secret data at an extremely low power level beneath the background noise floor of a legitimate signal.	Long-term cross-correlation analysis across highly synchronized receiver nodes.
+
+
+🧠 The Mathematical Puzzle: Constellation EVM Shifting
+
+In standard high-speed wireless protocols (like Wi-Fi), data is mapped onto a geometric grid called a Constellation Diagram using Quadrature Amplitude Modulation (QAM). For instance, in Quadrature Phase Shift Keying (QPSK), every symbol represents two bits mapped to ideal complex coordinates (I = In-Phase, Q = Quadrature).
+An RF steganographic transmitter takes the ideal target point and shifts it slightly depending on the hidden bit it wants to smuggle:
+• To hide a 0: Shift the symbol slightly closer to the graph's origin (lower amplitude).
+• To hide a 1: Shift the symbol slightly further from the graph's origin (higher amplitude).
+Because the shift is incredibly small, a standard commercial Wi-Fi card processes the symbol normally. It rounds the coordinate to the nearest ideal point and drops the tiny variation, viewing it as standard environmental thermal noise. A forensic SDR receiver, however, measures this exact distance variation—known as the **Error Vector—**and extracts the hidden binary array.
+
+💻 Python Code: Constellation Steganography Extractor
+
+The script below simulates an advanced software-defined radio forensic processing pipeline. It takes an array of intercepted complex IQ QPSK symbols, calculates their spatial deviation from the ideal constellation points, and extracts the steganographically embedded hidden bits.
+python
+import numpy as np
+
+def extract_stego_from_constellation(received_iq_symbols, ideal_symbols):
+    """
+    Forensic DSP script that calculates the Error Vector Magnitude (EVM) 
+    deviations of received QPSK symbols to extract hidden steganographic bits.
+    """
+    print(f"[*] Parsing {len(received_iq_symbols)} intercepted wireless symbols...")
+    extracted_stego_bits = []
+
+    # Iterate through the received symbols and compare them to the ideal baseline
+    for idx, rx_symbol in enumerate(received_iq_symbols):
+        # Find the index of the closest ideal constellation point
+        closest_ideal_idx = np.argmin(np.abs(ideal_symbols - rx_symbol))
+        ideal_point = ideal_symbols[closest_ideal_idx]
+        
+        # 1. Calculate the Error Vector (the physical drift from perfection)
+        # Error Vector = Received Coordinate - Ideal Coordinate
+        error_vector = rx_symbol - ideal_point
+        
+        # 2. Extract the magnitude (distance) of both vectors from the graph origin (0,0)
+        rx_magnitude = np.abs(rx_symbol)
+        ideal_magnitude = np.abs(ideal_point)
+        
+        # 3. Steganographic Decoding Logic:
+        # Measure if the received point was pushed inward or outward from the ideal spot
+        magnitude_delta = rx_magnitude - ideal_magnitude
+        
+        if magnitude_delta < 0:
+            # Pushed inward: Decodes to a hidden 0 bit
+            extracted_stego_bits.append(0)
+        else:
+            # Pushed outward: Decodes to a hidden 1 bit
+            extracted_stego_bits.append(1)
+
+    print("\n[🎯 RF Steganography Extraction Matrix Resolved]:")
+    print(f" ├── Reconstructed Hidden Bitstream: {extracted_stego_bits}")
+    
+    # Pack the extracted bits into printable 8-bit ASCII bytes
+    try:
+        byte_chunks = [extracted_stego_bits[i:i+8] for i in range(0, len(extracted_stego_bits), 8)]
+        decoded_text = "".join(chr(int("".join(map(str, b)), 2)) for b in byte_chunks if len(b) == 8)
+        print(f" └── Extracted Steganographic Flag:  \"{decoded_text}\"")
+        return decoded_text
+    except Exception:
+        return "[-] Data Conversion Error: Recovered bits did not map to a standard text string."
+
+if __name__ == "__main__":
+    # --- PHYSICAL SIGNAL SIMULATION CONFIGURATION ---
+    # Define the 4 ideal reference points for a standard QPSK Constellation mapping grid
+    # Coordinates represent 45, 135, 225, and 315 degrees on a complex plane
+    IDEAL_QPSK = np.array([0.707+0.707j, -0.707+0.707j, -0.707-0.707j, 0.707-0.707j])
+    
+    # Secret text string flag we want to camouflage inside the physical symbols
+    secret_flag = "HI" 
+    
+    # Convert string to flat list of bits: "H" (01001000) and "I" (01001001)
+    stego_bits = [0,1,0,0,1,0,0,0,  0,1,0,0,1,0,0,1]
+    
+    # Synthesize standard transmission symbols
+    # We repeat basic symbols but apply the tiny microscopic stego shifts over them
+    simulated_rx_symbols = []
+    stego_shift_amplitude = 0.05 # Tiny 5% variance (completely hidden within normal noise tolerances)
+    
+    for idx, bit in enumerate(stego_bits):
+        # Pick a generic ideal QPSK point (cycling through the 4 base points)
+        base_ideal = IDEAL_QPSK[idx % 4]
+        
+        # Calculate the outward unit direction vector to apply the shift accurately
+        direction_vector = base_ideal / np.abs(base_ideal)
+        
+        if bit == 1:
+            # Stego 1: Shift the coordinate OUTWARD
+            shifted_symbol = base_ideal + (direction_vector * stego_shift_amplitude)
+        else:
+            # Stego 0: Shift the coordinate INWARD
+            shifted_symbol = base_ideal - (direction_vector * stego_shift_amplitude)
+            
+        # Inject realistic environmental thermal noise (random atmospheric scatter)
+        random_noise = (np.random.normal(0, 0.01) + 1j * np.random.normal(0, 0.01))
+        simulated_rx_symbols.append(shifted_symbol + random_noise)
+        
+    # Execute the digital signal processing extraction loop
+    extract_stego_from_constellation(np.array(simulated_rx_symbols), IDEAL_QPSK)
+Use code with caution.
+
+🛡️ Forensic Defense & EVM Monitoring
+
+To detect covert channels hidden inside standard enterprise or military wireless networks, defense systems implement physical-layer anomaly tracking:
+1. Baseline EVM Profiling: Wireless Intrusion Detection Systems (WIDS) track the Error Vector Magnitude (EVM) across the network. If an environment is quiet, the EVM scatter plot around a constellation point should be perfectly random and uniform. If an unauthorized steganographic channel is operating, the EVM metrics will show structured, bimodal clustering (grouping explicitly inward or outward), instantly alerting analysts to a data exfiltration attempt.
+2. Strict Channel State Information (CSI) Auditing: Advanced firewalls profile the fine-grained physical layer properties of multipath radio reflections (CSI). If the CSI phase responses of successive frames show high entropy or periodic adjustments that do not correspond to the physical movements of objects in the room, the layer-1 controller flags a covert channel anomaly.
+
+✅ RF Steganography Extraction Path Verified
+
+
