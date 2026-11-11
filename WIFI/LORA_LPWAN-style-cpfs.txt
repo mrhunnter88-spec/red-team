@@ -1,1 +1,135 @@
 
+🎨 The Architecture of a LoRa/LPWAN Audit
+
+To pull unencrypted text strings or session keys from a raw LoRa radio wave, an auditor must configure three distinct hardware and software variables:
+
+1. Physical Layer: Chirp Spread Spectrum (CSS) Tuning
+
+Unlike standard protocols using fixed carrier tones, LoRa spreads data across a wide band by continuously sweeping the frequency up or down over time (creating an "Up-chirp" or "Down-chirp"). To demodulate this wave using an SDR, you must match the target node's three core physical settings:
+• Center Frequency: Typically sub-GHz ISM bands (868 MHz in Europe, 915 MHz in North America, 865 MHz in India).
+• Bandwidth (BW): The width of the frequency sweep (standard sizes are 125 kHz, 250 kHz, or 500 kHz).
+• Spreading Factor (SF): Defines how many chirps represent a single data symbol (ranging from SF7 for fast, short-range signals to SF12 for long-range, slow signals).
+
+2. MAC Layer: De-chirping and De-whitening
+
+Once the hardware tracks the chirps, it performs "De-chirping" (multiplying the raw wave by an unmodulated down-chirp to collapse the signal back into a clean frequency spike). The underlying bit array then goes through an inverse data whitening matrix and a Hamming Forward Error Correction (FEC) decoder to recover the structural raw packet bytes.
+
+3. Cryptographic Layer: Parsing the LoRaWAN Payload
+
+LoRaWAN implements mandatory 128-bit AES encryption. A completely intercepted packet reveals the following structural fields:
+text
++------------------+-------------------+--------------------+-------------------+
+
+
+| MAC Header (MHDR)| DevAddr (32 Bits) | Frame Counter(FCnt)| Encrypted Payload |
+| (1 Byte)         | [Routing Address] | [Anti-Replay Sync] | (FRMPayload)      |
++------------------+-------------------+--------------------+-------------------+
+Use code with caution.
+To read the flag, an auditor must recover the AppSKey (Application Session Key). If developers hardcode static root keys (like an obvious AppKey found via firmware extraction), an auditor can compute the session keys and decrypt the payload offline.
+
+💻 Python Code: LoRa CSS De-chirper & Payload Decryptor
+
+The security script below simulates two steps of a forensic radio pipeline. Module 1 handles the physical layer math—taking raw complex IQ data and performing a de-chirp multiply operation. Module 2 implements the LoRaWAN application layer, taking the raw network payload and executing an offline AES-128 counter-mode decryption to expose the hidden flag string.
+python
+import numpy as np
+from crypto.Cipher import AES  # Standard PyCryptodome library
+
+# =====================================================================
+# MODULE 1: PHYSICAL LAYER LORA DE-CHIRPING SIMULATOR
+# =====================================================================
+def dechirp_lora_symbol(received_iq_samples, bandwidth=125e3, sample_rate=1e6):
+    """
+    Simulates a LoRa physical receiver element. Multiplies an incoming 
+    Up-chirp symbol by a clean raw Down-chirp baseline matrix to collapse 
+    the spread signal into a single, decodable frequency spike.
+    """
+    num_samples = len(received_iq_samples)
+    t = np.linspace(0, num_samples / sample_rate, num_samples, endpoint=False)
+    
+    # 1. Synthesize a clean local reference Down-chirp baseline wave
+    # A standard down-chirp sweeps from +BW/2 down to -BW/2 line coordinates
+    f_down = (bandwidth / 2) - (t * (bandwidth ** 2) / num_samples)
+    phase_down = 2 * np.pi * np.cumsum(f_down) / sample_rate
+    ideal_downchirp = np.exp(1j * phase_down)
+    
+    # 2. De-chirp operation: Multiply the signals to cancel the time-varying slope
+    dechirped_signal = received_iq_samples * ideal_downchirp
+    
+    # 3. Perform an FFT to convert the collapsed signal into a sharp frequency bin spike
+    fft_data = np.abs(np.fft.fft(dechirped_signal))
+    detected_symbol_bin = np.argmax(fft_data[:num_samples // 2])
+    
+    print(f"[*] Physical Layer De-chirping Complete.")
+    print(f" └── Maximum energy resolved at spectral index bin: {detected_symbol_bin}")
+    return dechirped_signal
+
+# =====================================================================
+# MODULE 2: LORAWAN FRMPAYLOAD AES-128 DECRYPTION ENGINE
+# =====================================================================
+def decrypt_lorawan_payload(encrypted_hex, appskey_hex, dev_addr_hex, frame_counter, direction=0):
+    """
+    Decrypts a LoRaWAN FRMPayload field using AES-128 CTR variant.
+    LoRaWAN constructs a unique 'Sequence Block A' for encryption context.
+    """
+    encrypted_bytes = bytes.fromhex(encrypted_hex)
+    appskey = bytes.fromhex(appskey_hex)
+    dev_addr = bytes.fromhex(dev_addr_hex)[::-1] # Device Address is little-endian in block construction
+    
+    print(f"[*] Parsing Encrypted LoRaWAN payload data ({len(encrypted_bytes)} bytes)...")
+    
+    # 1. Construct the critical 16-byte Block A context vector required by the spec
+    # Byte 0=0x01, Bytes 1-4=0x00, Byte 5=Dir, Bytes 6-9=DevAddr, Bytes 10-13=FCnt, Byte 14=0x00, Byte 15=BlockNum
+    block_a = bytearray(16)
+    block_a[0] = 0x01
+    block_a[5] = direction
+    block_a[6:10] = dev_addr
+    block_a[10:14] = frame_counter.to_bytes(4, byteorder='little')
+    
+    # 2. Generate the keystream via standard AES ECB encryption on Block A
+    cipher = AES.new(appskey, AES.MODE_ECB)
+    keystream = b""
+    
+    # Calculate how many 16-byte blocks are required to cover the payload
+    num_blocks = (len(encrypted_bytes) + 15) // 16
+    for i in range(1, num_blocks + 1):
+        block_a[15] = i
+        keystream += cipher.encrypt(bytes(block_a))
+        
+    # 3. Perform XOR operation between the raw payload and the derived keystream
+    decrypted_bytes = bytes(p ^ k for p, k in zip(encrypted_bytes, keystream))
+    
+    try:
+        decrypted_text = decrypted_bytes.decode('utf-8', errors='ignore')
+        print("\n[🎯 LoRaWAN MAC Layer Cryptography Decoded]:")
+        print(f" ├── Reconstructed Block A: {block_a.hex().upper()}")
+        print(f" └── Extracted Flag String:  \"{decrypted_text}\"")
+        print("-" * 65)
+        return decrypted_text
+    except Exception:
+        return "[-] Cryptographic Failure: Resulting payload data unparseable."
+
+if __name__ == "__main__":
+    # --- PHYSICAL IMPLEMENTATION DATA MATRIX ---
+    # Target encryption configuration recovered from a client firmware backup file
+    LEAKED_APPSKEY   = "2B7E151628AED2A6ABF7158809CF4F3C"
+    TARGET_DEV_ADDR  = "01234567"
+    FRAME_COUNT      = 12
+    
+    # Intercepted raw data payload (Hex representation of encrypted flag)
+    INTERCEPTED_HEX  = "039B6F304B7669DF3E04FF6C8D80F3E7"
+    
+    # Run the cryptographic recovery pipeline
+    decrypt_lorawan_payload(INTERCEPTED_HEX, LEAKED_APPSKEY, TARGET_DEV_ADDR, FRAME_COUNT)
+Use code with caution.
+
+🛡️ Defensive Auditing & Attack Vector Mitigations
+
+Industrial systems must harden their configurations to counter passive sniffing and frame tampering:
+1. Avoid Insecure Activation by Personalization (ABP): Under the ABP model, session keys (AppSKey and NwkSKey) are hardcoded directly into the device's persistent flash memory for its entire lifecycle. If an adversary extracts the firmware from one exposed sensor field node, the entire historic traffic log becomes retroactively readable. Networks should enforce Over-the-Air Activation (OTAA), which uses a dynamic join procedure to derive fresh, ephemeral session keys every time a device connects.
+2. Mitigate Frame Counter Replay Vulnerabilities: Because LoRaWAN signals traverse miles of open air, attackers often try to execute replay attacks. Gateways check the Frame Counter (FCnt) integer inside the packet header. If a gateway receives a packet with an FCnt equal to or lower than the last processed sequence number, it must drop the packet immediately. System reviewers verify that this anti-replay protection is actively enforced on the Network Server.
+
+✅ LoRaWAN Flag Extraction Vector Map
+
+The auditing pipeline resolves encrypted long-range signals through two distinct decoding layers:
+\(\text{SDR\ Capture}\longrightarrow \text{De-chirp\ Multiply\ via\ Reference\ Down-chirp}\longrightarrow \text{Extract\ Whitened\ Binary\ Frame\ Data}\)
+\(\text{Frame\ Data\ Parsing}\longrightarrow \text{Isolate\ DevAddr\ \&\ FCnt}\longrightarrow \text{AES-128\ CTR\ XOR\ Keystream}\longrightarrow \text{Cleartext\ Flag}\)
