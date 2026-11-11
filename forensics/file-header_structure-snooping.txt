@@ -1,1 +1,87 @@
 
+🛠️ Step-by-Step Validation Logic
+
+1. Limit Read Slices: Open the file in binary mode ('rb') and read only the first few kilobytes. This prevents Denial of Service (DoS) attacks from massive files.
+2. Inspect Magic Bytes (File Headers): Extract the initial bytes and compare them against a strict, verified signature whitelist (e.g., PNG always starts with 89 50 4E 47).
+3. Analyze Structural Integrity: Go beyond the header. For instance, verify that a PNG terminates with the correct end-of-file chunk (IEND).
+4. Enforce Type Alignment: Ensure the calculated MIME type perfectly matches the intended file extension. Reject the file immediately if there is a mismatch.
+
+🐍 Python Code Implementation
+
+The following production-ready script uses built-in Python tools to validate both the magic header bytes and the structural boundary of an uploaded file.
+python
+import os
+
+# Define a strict whitelist of allowed file signatures (Hex arrays)
+VALID_SIGNATURES = {
+    "png": {
+        "mime": "image/png",
+        "header": b"\x89PNG\r\n\x1a\n",
+        "footer": b"IEND\xaeB`\x82"  # Standard structural end boundary
+    },
+    "pdf": {
+        "mime": "application/pdf",
+        "header": b"%PDF-",
+        "footer": b"%%EOF"
+    }
+}
+
+def secure_validate_file(file_path: str, expected_extension: str) -> bool:
+    """
+    Validates a file by inspecting its header magic bytes and structure.
+    """
+    ext = expected_extension.lower().lstrip('.')
+    if ext not in VALID_SIGNATURES:
+        print(f"❌ Extension '.{ext}' is not supported in the whitelist.")
+        return False
+        
+    rules = VALID_SIGNATURES[ext]
+    header_len = len(rules["header"])
+    footer_len = len(rules["footer"])
+    
+    try:
+        # Step 1: Safely inspect file size
+        file_size = os.path.getsize(file_path)
+        if file_size < header_len + footer_len:
+            print("❌ File is too small to contain valid structures.")
+            return False
+
+        with open(file_path, "rb") as f:
+            # Step 2: Verify the Magic Header Bytes
+            file_header = f.read(header_len)
+            if file_header != rules["header"]:
+                print(f"❌ Header mismatch! File does not match .{ext} signature.")
+                return False
+            
+            # Step 3: Verify the Structural Footer (Snooping/Spoof Check)
+            f.seek(-footer_len, os.SEEK_END)
+            file_footer = f.read(footer_len)
+            if file_footer != rules["footer"]:
+                print(f"❌ Structural anomaly! File header matches, but the structure is broken.")
+                return False
+                
+        print(f"✅ Secure Validation Passed: File is a structurally sound .{ext}")
+        return True
+
+    except IOError as e:
+        print(f"❌ Error reading file: {e}")
+        return False
+
+# --- Example Usage ---
+# Suppose an attacker renames 'malicious.exe' to 'vacation.png' 
+# The script will instantly catch it during the header byte check.
+Use code with caution.
+
+💡 Pro-Tip: Using Industry Standard Libraries
+
+For wider format support without manual byte-mapping, integrate the native python-magic wrapper (which interfaces with the Linux file system utility):
+python
+# pip install python-magic
+import magic
+
+def probe_mime_type(file_path):
+    # Reads the first 2048 bytes to determine structural type
+    detector = magic.Magic(mime=True)
+    detected_mime = detector.from_file(file_path)
+    return detected_mime
+Use code with caution.
