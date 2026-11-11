@@ -1,1 +1,125 @@
 
+🕵️‍♂️ Key Artifact Locations
+
+1. Process Environment Block (PEB): Contains a pointer to RTL_USER_PROCESS_PARAMETERS. This structure holds the raw command line string used to launch the process.
+2. Registry-like Structures / In-Memory Hives: OS configuration caches (like Windows Registry handles or Linux configuration daemons) reside in memory pages before hitting the disk.
+3. Shell History Streams: Shells (like Bash or PowerShell) maintain active in-memory command histories before writing them out to .bash_history or ConsoleHost history files.
+
+🐍 Python Code Implementation: Volatile Artifact Scanner
+
+The script below shows how to pull active command-line parameters, audit file configurations, and extract operational shell history buffers directly from system structures using Python.
+python
+import os
+import sys
+import psutil
+from typing import Dict, Any
+
+def extract_live_command_lines() -> Dict[int, Dict[str, Any]]:
+    """
+    Scans the Process Environment Block parameters of all running applications.
+    Detects obfuscated or suspicious background command arguments.
+    """
+    print("📋 Reconstructing process command-line arguments...")
+    process_artifacts = {}
+    
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'username']):
+        try:
+            pid = proc.info['pid']
+            name = proc.info['name']
+            cmdline_args = proc.info['cmdline']
+            
+            if cmdline_args:
+                # Reconstruct the full execution string
+                full_cmd_string = " ".join(cmdline_args)
+                
+                # Flag common script execution bypass or hiding tactics
+                suspicious_flags = ["-nop", "-w hidden", "-enc", "bypass", "downloadstring", "base64"]
+                is_suspicious = any(flag in full_cmd_string.lower() for flag in suspicious_flags)
+                
+                process_artifacts[pid] = {
+                    "name": name,
+                    "command_line": full_cmd_string,
+                    "suspicious": is_suspicious
+                }
+                
+                if is_suspicious:
+                    print(f"⚠️ SUSPICIOUS CMDLINE [PID {pid} - {name}]: {full_cmd_string}")
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+            
+    return process_artifacts
+
+def extract_live_shell_history():
+    """
+    Attempts to read operational shell execution paths and persistent terminal histories.
+    """
+    print("\n🐚 Scoping terminal history streams...")
+    home_dir = os.path.expanduser("~")
+    
+    # Define standard target files where history structures flush
+    history_targets = {
+        "Bash History": os.path.join(home_dir, ".bash_history"),
+        "Zsh History": os.path.join(home_dir, ".zsh_history"),
+        "PowerShell History": os.path.join(
+            home_dir, "AppData", "Roaming", "Microsoft", "Windows", "PowerShell", 
+            "PSReadLine", "ConsoleHost_history.txt"
+        ) if os.name == 'nt' else None
+    }
+    
+    for shell_name, file_path in history_targets.items():
+        if file_path and os.path.exists(file_path):
+            try:
+                print(f"📁 Parsing stream layout for {shell_name}: {file_path}")
+                with open(file_path, "r", errors="ignore") as f:
+                    # Read the final 5 executed commands for recent activity verification
+                    lines = f.readlines()
+                    recent_commands = [line.strip() for line in lines[-5:]]
+                    for cmd in recent_commands:
+                        if cmd:
+                            print(f"   ➔ {cmd}")
+            except IOError as e:
+                print(f"❌ Could not access {shell_name} profile path: {e}")
+
+# --- Platform Specific Win32 Registry Engine Extraction ---
+if os.name == 'nt':
+    import winreg
+    def audit_persistence_registry_structures():
+        """
+        Validates Registry structures responsible for execution persistence.
+        """
+        print("\n🔑 Auditing structural Registry paths for hidden payloads...")
+        target_keys = [
+            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run"),
+            (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Run")
+        ]
+        
+        for root, subkey in target_keys:
+            try:
+                with winreg.OpenKey(root, subkey, 0, winreg.KEY_READ) as key:
+                    num_values = winreg.QueryInfoKey(key)[1]
+                    for i in range(num_values):
+                        name, value, _ = winreg.EnumValue(key, i)
+                        print(f"📌 Registry Entry [{name}]: {value}")
+            except PermissionError:
+                print(f"❌ Access denied to Registry path: {subkey}")
+            except FileNotFoundError:
+                continue
+
+# --- Execution Entry ---
+if __name__ == "__main__":
+    extract_live_command_lines()
+    extract_live_shell_history()
+    if os.name == 'nt':
+        audit_persistence_registry_structures()
+Use code with caution.
+
+🛡️ Defeating Argument Spoofing (Masquerading)
+
+Advanced attackers can manipulate their command-line artifacts in memory. A technique called Command Line Spoofing allows an attacker to spawn a process (like powershell.exe) with a totally benign argument list (e.g., powershell.exe -Help), let the kernel log it, and then instantly overwrite the PEB structure memory space with their malicious payload string before the process runs.
+To find the true arguments when an attacker tampers with memory structures:
+• Kernel Event Tracing (ETW / Sysmon): Do not rely on active runtime memory parsing alone. You must match live memory with event capture. Systems like Sysmon (Event ID 1 - Process Creation) log the original command-line arguments provided at the exact moment of the kernel execution request, bypassing modifications made later to the user-mode PEB structure.
+• Offline Process Architecture Carving: If an incident handler runs an offline memory breakdown using Volatility, they can use specific sub-plugins to bypass the PEB completely:
+bash
+# Bypasses easily-spoofed user-space structures by walking kernel memory pools
+vol -f memory.raw windows.cmdline
+Use code with caution.
