@@ -1,1 +1,113 @@
 
+Step 1: The Core Architecture Layers
+
+When analyzing a hybrid application, you must separate your investigation into two phases:
+text
++---------------------------------------+
+
+|        1. HIGH-LEVEL WRAPPER          |  <- Analyzed with JADX, VS Code,
+|   (JavaScript, Dart, Java, Python)    |     or basic archive unpackers.
++---------------------------------------+
+                   │
+                   ▼ [The Bridge: JNI / FFI / WebAssembly]
++---------------------------------------+
+
+|         2. NATIVE SYSTEM LAYER        |  <- Analyzed with Ghidra, x64dbg,
+|         (C/C++, Rust, Go Assembly)    |     or dynamic API interceptors.
++---------------------------------------+
+Use code with caution.
+
+Step 2: Step-by-Step Hybrid Reversing Strategies
+
+
+Strategy A: Reversing Flutter Applications (Dart + Native)
+
+Flutter apps compile Dart code directly into ahead-of-time (AOT) native machine code inside an engine file named libapp.so (Android) or App (iOS).
+1. The Challenge: Conventional Java decompilers show an empty shell. Standard native decompilers like Ghidra show unnamed instructions because Dart uses a highly customized, non-standard ABI (Application Binary Interface) that does not use traditional function epilogues.
+2. The Extraction Solution: Use a specialized mapping parser like reFlutter. It patches the target runtime engine to force the application to dump its internal Dart Object symbols, class structures, and function offset arrays directly to a log file.
+3. The Target Bridge: Once you have the offset layout, load libapp.so into Ghidra and jump directly to those specific addresses to trace the validation arithmetic.
+
+Strategy B: Reversing Electron Apps (JavaScript + Node Native Modules)
+
+Electron applications package a Node.js backend with Chromium.
+1. The Extraction Solution: Look inside the installation folder under the resources/ directory for a file named app.asar. This is an unindexed archive file. You can extract it natively via Python or Node.js to review the cleartext source JavaScript files.
+2. Locating the Native Bridge: Look inside the extracted source code for references to .node extensions or explicit bindings:javascript
+// Spotting the native layer entry point
+const nativeCryptoEngine = require('./bindings.node');
+const verificationResult = nativeCryptoEngine.verifySerial(userInput);
+Use code with caution.
+3. The Binary Solution: The .node file is simply a standard native Dynamic Link Library (DLL) or Shared Object (SO). Change its file extension to .dll or .so and pull it straight into a machine-code disassembler to audit the internal binary structure.
+
+Step 3: Automating Hybrid Inspection with Python
+
+When reverse engineering the bridge between a high-level language and machine code, manually tracing arguments is tedious. We can use a Python controller script powered by Frida to hook the Foreign Function Interface (FFI) or JNI boundary directly.
+Below is a production-ready script that hooks native system library memory exports when triggered by a high-level application layer.
+python
+import sys
+import frida
+
+# JavaScript engine payload to capture native transitions
+js_bridge_hook = """
+// 1. Wait until the target native library module is initialized in memory
+var native_module_name = "libnative_crypto.so"; 
+var target_function_symbol = "Java_com_example_app_SecurityBridge_validateLicense";
+
+Interceptor.attach(Module.findExportByName(native_module_name, target_function_symbol), {
+    onEnter: function (args) {
+        console.log("\\n[+] ---> Transitioning to Native Engine Layer!");
+        
+        // In JNI, args[0] is JNIEnv*, args[1] is the class object. 
+        // args[2] is the actual first parameter passed down (e.g., pointer to a string pointer)
+        var user_string_pointer = args[2];
+        
+        if (!user_string_pointer.isNull()) {
+            try {
+                // Read and format the raw memory bytes passed across the architecture bridge
+                console.log("[*] Argument Passed to Native: " + Memory.readUtf8String(user_string_pointer));
+            } catch (e) {
+                console.log("[*] Pointer data is binary/structured payload data.");
+            }
+        }
+    },
+    onLeave: function (retval) {
+        console.log("[*] Native Function Complete.");
+        console.log("[*] Original Return Value: " + retval.toInt32());
+        
+        // Dynamically manipulate the return value moving back up to the high-level framework
+        // Changing a 0 (Failure) to a 1 (Success)
+        if (retval.toInt32() === 0) {
+            retval.replace(ptr(1));
+            console.log("[+] Modified Native Return Value to: 1");
+        }
+        console.log("[<---] Returning safely to High-Level Runtime Engine Wrapper.");
+    }
+});
+"""
+
+def print_log(message, data):
+    if message['type'] == 'send':
+        print(f"{message['payload']}")
+    else:
+        print(message)
+
+if __name__ == "__main__":
+    # Specify target executing process profile
+    process_target = "com.hybrid.security_challenge"
+    
+    try:
+        session = frida.get_usb_device().attach(process_target)
+        script = session.create_script(js_bridge_hook)
+        script.on('message', print_log)
+        script.load()
+        print(f"[+] Active structural hooks deployed against {process_target}. Monitor logs...")
+        sys.stdin.read()
+    except Exception as error_msg:
+        print(f"[-] Architecture hooking failed: {error_msg}")
+Use code with caution.
+
+Restating the Core Solution Mechanics
+
+
+✅ Hybrid Native Deconstruction Rule
+
+Solving hybrid environments requires isolating the high-level application structure (such as ASAR archives or Dart class indexes) to track how user inputs travel, then utilizing dynamic memory framework scripts to capture or patch the variables as they transition across the FFI, WebAssembly, or JNI runtime bridge into native compiled code libraries.
