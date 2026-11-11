@@ -1,1 +1,105 @@
 
+
+🗺️ The Standard Wi-Fi Band Architecture
+
+Modern wireless deployments partition the Radio Frequency (RF) spectrum into three dominant, standardized bands. Each band is carved into smaller channels separated by a fixed channel spacing:
+
+Wireless Band	Frequency Range	Common Channels	Channel Characteristics
+2.4 GHz Band	2.400 – 2.4835 GHz	1 to 13 (14 in Japan)	5 MHz channel spacing. Highly congested; significant overlap between adjacent channels.
+5 GHz Band	5.150 – 5.850 GHz	36 to 165	20 MHz base spacing. Supports channel bonding (40, 80, 160 MHz) for higher data rates.
+6 GHz (Wi-Fi 6E/7)	5.925 – 7.125 GHz	1 to 233	Up to 1.2 GHz of pristine, uncrowded spectrum with ultra-wide channel sizes.
+
+
+🧠 The Mathematical Puzzle: Finding the Center Frequency (\(f_{c}\))
+
+If you intercept an unknown or hopping transmission, you will not initially know its exact channel configuration. To find it programmatically, digital signal processing (DSP) workflows apply a Fast Fourier Transform (FFT) to translate raw time-domain IQ radio samples into the frequency domain.
+By computing the Power Spectral Density (PSD), you can pinpoint exactly where the radio energy concentrates. There are two primary algorithms used to resolve the center frequency:
+1. Peak Spectral Detection: Identifying the absolute highest peak in the frequency spectrum. (Best for narrow, continuous signals like single carriers).
+2. Occupied Bandwidth (OBW) Centroid: Finding the lower edge (\(f_{low}\)) and upper edge (\(f_{high}\)) where the signal's power drops by 3dB (halving the power), and computing the geometric center: \(f_c = \frac{f_{low} + f_{high}}{2}\). (Best for wideband Wi-Fi signals).
+
+💻 Python Code: Automating Center Frequency Discovery
+
+The script below models an offline RF analyzer. It takes raw IQ samples from an SDR receiver, converts them into a frequency map using NumPy's FFT, and automatically calculates the exact center frequency and bandwidth of an active, unknown wireless signal.
+python
+import numpy as np
+
+def analyze_signal_center_frequency(iq_samples, sample_rate, sdr_center_freq):
+    """
+    Analyzes raw IQ data to calculate the exact center frequency 
+    and estimated bandwidth of an intercepted signal.
+    """
+    num_samples = len(iq_samples)
+    print(f"[*] Processing {num_samples} raw radio samples...")
+    print(f"[*] SDR Hardware Hardware Tuned to: {sdr_center_freq / 1e6:.3f} MHz")
+
+    # 1. Compute the Fast Fourier Transform (FFT) to shift to Frequency Domain
+    fft_data = np.fft.fft(iq_samples)
+    fft_shifted = np.fft.fftshift(fft_data) # Shifts zero-frequency component to center
+    
+    # 2. Calculate Power Spectral Density (PSD) in Watts
+    psd = np.abs(fft_shifted) ** 2
+    
+    # 3. Generate corresponding relative frequency bin offsets
+    freq_bins = np.fft.fftfreq(num_samples, d=1.0/sample_rate)
+    freq_bins_shifted = np.fft.fftshift(freq_bins)
+
+    # 4. Method A: Peak Frequency Detection
+    peak_index = np.argmax(psd)
+    peak_offset = freq_bins_shifted[peak_index]
+    calculated_peak_fc = sdr_center_freq + peak_offset
+
+    # 5. Method B: -3dB Occupied Bandwidth Centroid (More accurate for wide Wi-Fi)
+    max_power = psd[peak_index]
+    three_db_threshold = max_power * 0.5  # -3dB drops power by 50%
+    
+    # Find all indices where the signal power sits above the threshold
+    active_signal_indices = np.where(psd >= three_db_threshold)[0]
+    
+    if len(active_signal_indices) > 0:
+        f_low_offset = freq_bins_shifted[active_signal_indices[0]]
+        f_high_offset = freq_bins_shifted[active_signal_indices[-1]]
+        
+        # Calculate actual edge frequencies
+        f_low = sdr_center_freq + f_low_offset
+        f_high = sdr_center_freq + f_high_offset
+        
+        # Centroid formula: Midpoint between upper and lower bounds
+        calculated_centroid_fc = (f_low + f_high) / 2
+        estimated_bandwidth = f_high - f_low
+    else:
+        calculated_centroid_fc = calculated_peak_fc
+        estimated_bandwidth = 0.0
+
+    print("\n[🔍 DSP Detection Matrix Results]:")
+    print(f" ├── Peak Power Offset:     {peak_offset / 1e3:+.3f} kHz from hardware center")
+    print(f" ├── Resolved Peak Freq:    {calculated_peak_fc / 1e6:.4f} MHz")
+    print(f" ├── Resolved Centroid Freq:{calculated_centroid_fc / 1e6:.4f} MHz <-- (Target Tune Flag)")
+    print(f" └── Estimated Bandwidth:   {estimated_bandwidth / 1e6:.3f} MHz")
+    
+    return calculated_centroid_fc, estimated_bandwidth
+
+if __name__ == "__main__":
+    # --- SIMULATION CONFIGURATION ---
+    FS = 20e6               # SDR Sample Rate: 20 MHz (Captures a 20 MHz wide slice of air)
+    TUNED_FREQ = 2420e6      # SDR Hardware tuned to 2.420 GHz (Near Wi-Fi Channel 1/2)
+    
+    # Simulate an actual Wi-Fi channel centered at 2412 MHz (Channel 1)
+    # This leaves a relative offset of -8 MHz (-8e6 Hz) from our hardware tuning pointer
+    ACTUAL_TARGET_FC = 2412e6
+    relative_offset = ACTUAL_TARGET_FC - TUNED_FREQ
+    
+    # Synthesize time vector and mock IQ complex signal samples with added white noise
+    t = np.linspace(0, 0.001, int(FS * 0.001), endpoint=False)
+    clean_signal = np.exp(1j * 2 * np.pi * relative_offset * t) 
+    noise = (np.random.normal(0, 0.5, len(t)) + 1j * np.random.normal(0, 0.5, len(t)))
+    simulated_raw_iq = clean_signal + noise
+
+    # Execute the DSP calculation pipeline
+    target_fc, target_bw = analyze_signal_center_frequency(simulated_raw_iq, FS, TUNED_FREQ)
+Use code with caution.
+
+🛡️ Defensive Application: Guarding Against Rogue Spectrum Anomalies
+
+Wireless security teams monitor center frequencies to detect hardware threats on the physical layer:
+1. Channel Overlap Auditing: When deploying enterprise Wi-Fi networks, access points must be rigidly fixed to non-overlapping center frequencies (such as Channels 1, 6, and 11 in the 2.4 GHz spectrum). An automated DSP monitor analyzes the spectrum to alert administrators if neighboring consumer routers have drifted onto overlapping bounds, causing cross-channel packet corruption.
+2. Detection of Out-of-Band Transmissions: Rogue transmitters often use frequencies slightly off standard channel grids to evade detection by standard Wi-Fi cards. Software Defined Radios search the "dead zones" between channels to isolate unauthorized data exfiltration tunnels.
