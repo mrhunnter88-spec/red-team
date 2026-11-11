@@ -1,1 +1,114 @@
 
+📂 Key Structural Differences
+
+
+Artifact Layer	NTFS ($MFT)	Linux (Inode / ext4)
+Tracking Record	Each file/folder takes up a 1024-byte record in the hidden file $MFT. [1]	Each file points to a fixed-size Inode structure (usually 128 or 256 bytes).
+Timestamps	Tracks 8 timestamps total across two attributes: $STANDARD_INFORMATION (easily altered) and $FILE_NAME (hard to alter).	Tracks 4 timestamps: Access, Modify, Change (metadata), and Birth/Creation (crtime).
+Data Tracking	Resident Data: Small files (<~700 bytes) store data inside the MFT record itself.
+Non-Resident Data: Large files map data via Data Runs.	Points to raw data blocks using Direct/Indirect blocks (ext3) or Extents Trees (ext4).
+
+
+🐍 Python Code Implementation: Programmatic Inode & MFT Parser Framework
+
+The following script shows how to structure a low-level parser to read raw MFT block attributes and extract ext4 file extent trees to map actual data locations on disk.
+python
+import struct
+import datetime
+
+def parse_mft_record_header(mft_record_bytes: bytes):
+    """
+    Parses the 48-byte fixed header of an NTFS Master File Table ($MFT) record.
+    Identifies if the record is active, deleted, a file, or a directory.
+    """
+    print("🔬 Parsing NTFS $MFT structural record header...")
+    
+    # Standard $MFT structure format string for the first few fields:
+    # 4s : Magic number ("FILE")
+    # H  : Update sequence array offset
+    # H  : Size of update sequence array
+    # Q  : Logfile sequence number ($LogFile LSN)
+    # H  : Sequence number
+    # H  : Hard link count
+    # H  : Offset to first attribute
+    # H  : Flags (0x01 = In use, 0x02 = Directory)
+    fmt = "<4sHHQHHHH"
+    
+    if len(mft_record_bytes) < 48:
+        print("❌ Error: Truncated MFT byte stream.")
+        return
+
+    magic, _, _, lsn, seq_num, link_count, attr_offset, flags = struct.unpack(fmt, mft_record_bytes[:22])
+    
+    if magic != b"FILE":
+        print(f"❌ Structural Mismatch: Expected 'FILE' magic signature, got {magic}")
+        return
+
+    is_in_use = bool(flags & 0x01)
+    is_directory = bool(flags & 0x02)
+    
+    print(f"   • Record Status: {'🟢 Active/Allocated' if is_in_use else '🔴 Deleted/Unallocated'}")
+    print(f"   • Type: {'📁 Directory' if is_directory else '📄 File'}")
+    print(f"   • Hard Link Count: {link_count}")
+    print(f"   • First Attribute Offset: {attr_offset} bytes")
+    print(f"   • Sequence Number: {seq_num}")
+
+
+def parse_ext4_extent_header(extent_bytes: bytes):
+    """
+    Parses an ext4 filesystem extent tree header. Extents map virtual block 
+    offsets to physical disk blocks for files on modern Linux systems.
+    """
+    print("\n🐧 Parsing Linux ext4 Extent structural block...")
+    
+    # ext4 Extent Header Structure (`struct ext4_extent_header`):
+    # H : Magic number (Always 0xF30A)
+    # H : Number of valid entries following header
+    # H : Maximum capacity of entries
+    # H : Depth of the tree (0 = leaf node pointing to raw data blocks)
+    # I : Generation ID
+    fmt = "<HHHHI"
+    
+    if len(extent_bytes) < 12:
+        return
+        
+    magic, entries, max_capacity, depth, generation = struct.unpack(fmt, extent_bytes[:12])
+    
+    if magic != 0xF30A:
+        print(f"❌ Structural Mismatch: Expected ext4 extent magic 0xF30A, got {hex(magic)}")
+        return
+        
+    print(f"   • Valid Extent Entries: {entries}")
+    print(f"   • Tree Depth: {depth} ({'Leaf Node - Points directly to data blocks' if depth == 0 else 'Internal Node'})")
+
+# --- Example of processing binary blocks ---
+# record_buffer = b"FILE\x00..." # 1024 bytes extracted from an NTFS image
+# parse_mft_record_header(record_buffer)
+Use code with caution.
+
+🛡️ Industry-Standard Triage Workflows
+
+Manually mapping filesystem blocks in code can be slow during live incident response. Instead, use these optimized forensic suites to parse structural tables instantly.
+
+1. Uncovering Timestomping via NTFS $MFT Analysis
+
+Attackers frequently alter timestamps using tools that modify the $STANDARD_INFORMATION field. However, these tools usually fail to alter the copy stored in the $FILE_NAME attribute.
+Use MFTECmd (by Eric Zimmerman) to parse the $MFT table into a readable spreadsheet:
+bash
+# Parse a raw extracted $MFT file into a CSV timeline
+MFTECmd.exe -f C:\$MFT --csv C:\forensic_output\ --csvf mft_parsed.csv
+Use code with caution.
+• Analysis Step: Open the CSV and look for MFT Modified vs Standard Info Modified mismatches. If the Standard Info Modified time is before the MFT Modified time, the file timestamp was likely forged.
+
+2. Inspecting Linux Inode Metadata & Deletions via debugfs
+
+On Linux filesystems, use the native debugfs command-line utility to query active or deleted structural records directly from a partition device:
+bash
+# Open an ext4 partition in read-only mode
+sudo debugfs -R "stat /home/user/suspicious_file.sh" /dev/sda1
+Use code with caution.
+• What it reveals: It dumps the exact target Inode number, owner UID/GID, access lists, change times, and structural Extents maps showing exactly which blocks on the disk contain the file data.
+To see all recently deleted Inodes on that partition, run:
+bash
+sudo debugfs -R "lsdel" /dev/sda1
+Use code with caution.
