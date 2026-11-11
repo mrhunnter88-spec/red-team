@@ -1,1 +1,98 @@
 
+🛠️ The Correlation Logic
+
+1. Normalize Time Structs: Convert all incoming timestamp formats (ISO 8601, Epoch, Apache Log formats) into a uniform UTC datetime structure.
+2. Track Session Threads: Group entries by correlating vectors like Client IP Address, Session Cookies, or User-Agent strings instead of looking at standalone events.
+3. Map the URL Traversal: Track the exact sequences of URLs visited. A legitimate user follows a structure (e.g., Home -> Login -> Dashboard), while an RCE scanner hits arbitrary, unconnected paths (e.g., /index.php -> /wp-admin -> /config.json -> /upload/shell.php).
+
+🐍 Python Code Implementation: Timeline Correlator
+
+The script below aggregates web server logs and filesystem modification records, normalizes their temporal layout, and outputs a chronological footprint map.
+python
+from datetime import datetime, timezone
+from typing import List, Dict, Any
+
+# Mock raw data simulating multi-source inputs
+WEB_LOGS = [
+    {"ip": "203.0.113.5", "time": "08/Sep/2026:20:45:12 +0000", "url": "/login.php", "status": 200},
+    {"ip": "203.0.113.5", "time": "08/Sep/2026:20:46:01 +0000", "url": "/upload.php", "status": 200},
+    {"ip": "203.0.113.5", "time": "08/Sep/2026:20:46:15 +0000", "url": "/uploads/backdoor.php", "status": 404}
+]
+
+FILE_SYSTEM_EVENTS = [
+    {"file": "/var/www/uploads/backdoor.php", "time": "2026-09-08T20:46:10Z", "action": "CREATED"},
+    {"file": "/var/www/uploads/backdoor.php", "time": "2026-09-08T20:46:12Z", "action": "MODIFIED"}
+]
+
+def parse_apache_time(time_str: str) -> datetime:
+    """Parses Apache/Nginx local time string to a normalized UTC datetime object."""
+    # Format: 08/Sep/2026:20:45:12 +0000
+    dt = datetime.strptime(time_str.split()[0], "%d/%b/%Y:%H:%M:%S")
+    return dt.replace(tzinfo=timezone.utc)
+
+def parse_iso_time(time_str: str) -> datetime:
+    """Parses standard ISO 8601 timestamps to a normalized UTC datetime object."""
+    # Format: 2026-09-08T20:46:10Z
+    dt = datetime.strptime(time_str, "%Y-%m-%dT%H:%M:%SZ")
+    return dt.replace(tzinfo=timezone.utc)
+
+def generate_correlated_timeline(web_events: List[Dict], file_events: List[Dict]) -> List[Dict]:
+    """
+    Normalizes timestamps across different log types and correlates them 
+    chronologically to expose attacker traversal vectors.
+    """
+    unified_timeline = []
+
+    # Process and ingest web structures
+    for log in web_events:
+        normalized_time = parse_apache_time(log["time"])
+        unified_timeline.append({
+            "timestamp": normalized_time,
+            "source": "WEB_SERVER",
+            "actor": log["ip"],
+            "details": f"Requested URL: {log['url']} (Status: {log['status']})"
+        })
+
+    # Process and ingest filesystem structures
+    for event in file_events:
+        normalized_time = parse_iso_time(event["time"])
+        unified_timeline.append({
+            "timestamp": normalized_time,
+            "source": "FILE_SYSTEM",
+            "actor": "SYSTEM_KERNEL",
+            "details": f"File {event['file']} was {event['action']}"
+        })
+
+    # Step 4: Strict chronological sort to interleave events perfectly
+    unified_timeline.sort(key=lambda x: x["timestamp"])
+
+    # Output the unified structural timeline map
+    print(f"📅 --- Correlated Forensic Timeline (Total Events: {len(unified_timeline)}) ---")
+    for event in unified_timeline:
+        time_str = event["timestamp"].strftime("%Y-%m-%d %H:%M:%S UTC")
+        print(f"[{time_str}] [{event['source']}] -> {event['details']}")
+
+    return unified_timeline
+
+if __name__ == "__main__":
+    generate_correlated_timeline(WEB_LOGS, FILE_SYSTEM_EVENTS)
+Use code with caution.
+
+📊 Timeline Anomaly Extraction
+
+When analyzing the output of your correlated timeline, you can catch structural manipulation using these baseline rules:
+1. The Time-Travel Anomaly (Negative Delta): If a web log shows a request to /uploads/backdoor.php at 20:46:15, but the file system logs show the file was modified at 20:10:00, the attacker successfully executed an RCE web request and used a timestomping script to artificially push the file creation time backward to blend in with old, legitimate assets.
+2. Directory Traversal Sequencing: Track the time delta between sequential URL requests. Automated scanners like GoBuster or DirBuster will hit dozens of unrelated directory structures within the exact same millisecond, whereas a human web browser structure enforces a natural 2 to 5-second human-interaction gap.
+
+🛡️ Open Source Big-Data Timeline Correlation (Plaso)
+
+If you are dealing with millions of log lines and system entries, script parsing will bottleneck. The enterprise standard tool for structural correlation is Plaso (log2timeline).
+Plaso ingests everything—web logs, syslog, system registries, and Master File Tables—normalizes them into a centralized database engine, and exports a unified timeline file:
+bash
+# Step 1: Extract all chronological structures from the system into a Plaso storage container
+log2timeline.py --storage-file timeline.plaso /var/log/ /etc/nginx/
+
+# Step 2: Filter and output to a readable CSV structure for deep analysis
+psort.py -o l2tcsv -w timeline.csv timeline.plaso
+Use code with caution.
+
