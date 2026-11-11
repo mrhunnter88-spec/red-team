@@ -1,1 +1,124 @@
 
+🎨 The Architecture of Satellite & ADS-B Tracking
+
+Aircraft continuously broadcast telemetry into the sky via ADS-B (Automatic Dependent Surveillance–Broadcast). When planes are over land, terrestrial antennas harvest this data; when planes cruise over oceans or the poles, satellite constellations (such as Iridium or Spire) intercept the raw waveforms from space and relay them to global data hubs.
+
+📐 The 1090 MHz Mode S Extended Squitter (DF17)
+
+ADS-B data streams operate at a physical layer frequency of 1090 MHz utilizing Pulse Position Modulation (PPM) at 1 Megabit per second. The core protocol structure relies on standard Mode S Extended Squitters (Downlink Format 17) which are exactly 112 bits long:
+text
++---------+---------+--------------------------+-----------------------+-----------------------+
+
+| DF (5b) | CA (3b) | ICAO Aircraft Addr (24b) | ME Data Payload (56b) | PI Checksum/Parity24b|
+| [10001] | [Capab] | [Unique Registry Token]  | [Telemet/Message Type]| [Hardware Validation] |
++---------+---------+--------------------------+-----------------------+-----------------------+
+Use code with caution.
+1. Downlink Format (DF): The first 5 bits define the payload mode. For ADS-B, this field is strictly hardcoded to 17 (binary 10001).
+2. ICAO Address: A unique 24-bit hardware identifier permanently tied to the aircraft's frame.
+3. ME Payload Field: The 56-bit message core. The first 5 bits of this field dictate the Type Code (e.g., Type Codes 1–4 indicate Aircraft Identification/Callsign, while Type Codes 9–18 indicate Airborne Position).
+
+🧠 The Coordinate Decoding Puzzle: Compact Position Reporting (CPR)
+
+To squeeze ultra-precise GPS coordinates into the tiny 56-bit ME window, aviation engineers engineered Compact Position Reporting (CPR). Instead of sending absolute numbers, an aircraft alternately transmits two distinct frame types:
+• Even Frames (CPR Format flag = 0)
+• Odd Frames (CPR Format flag = 1)
+A receiver must capture both an even and an odd message close together in time, then combine their relative fractional values using a spherical math algorithm to resolve the unambiguous physical latitude and longitude coordinates of the target plane.
+
+💻 Python Code: Parsing Sky Flags from Raw Extended Squitters
+
+In an aerospace audit or CTF challenge, you are handed raw hex captures of telemetry frames grabbed by an RTL-SDR radio or extracted from a satellite downlink pipeline. The forensic engine below skips complex external libraries to unpack a raw 112-bit Mode S squitter directly, verifying the Downlink Format, decoding the 24-bit ICAO registration token, and decoding the 8-character callsign payload.
+python
+def decode_adsb_callsign_payload(me_payload_bytes):
+    """
+    Decodes an 8-character aircraft identification callsign from the 
+    56-bit ME payload field. Uses the standard 6-bit AIS/ICAO character map.
+    """
+    # Character mapping index table for Mode S text fields
+    # 0-26 map to @ to Z, 32-47 map to space and numeric markers
+    CHAR_MAP = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ#####_###############0123456789######"
+    
+    # Convert the 7 payload bytes into a single continuous binary string
+    binary_str = "".join(f"{b:08b}" for b in me_payload_bytes)
+    
+    # The first 5 bits are the Type Code (already parsed), skip them
+    text_bits = binary_str[5:53] # Extract 48 bits of character data
+    
+    callsign = ""
+    # Process 48 bits in sequential 6-bit character blocks (8 characters total)
+    for i in range(0, 48, 6):
+        char_index = int(text_bits[i:i+6], 2)
+        callsign += CHAR_MAP[char_index]
+        
+    return callsign.replace("_", " ").strip()
+
+def parse_sky_flag_squitter(hex_packet):
+    """
+    Parses a 112-bit Mode S Extended Squitter (ADS-B) packet string
+    to isolate aircraft identities and hidden tracking string flags.
+    """
+    try:
+        raw_bytes = bytes.fromhex(hex_packet)
+    except ValueError:
+        return "[-] Parsing Error: Provided data string is not valid hexadecimal."
+
+    # Validate mandatory 112-bit boundary length (14 bytes)
+    if len(raw_bytes) != 14:
+        return f"[-] Frame Dropped: Invalid block size ({len(raw_bytes)} bytes). Expected 14."
+
+    # 1. Parse Downlink Format (DF) from the first byte (upper 5 bits)
+    df_code = (raw_bytes[0] >> 3) & 0x1F
+    
+    # 2. Safety filter: Verify this is an actual ADS-B Extended Squitter message
+    if df_code != 17:
+        return f"[-] Filter Notice: Bypassing non-ADS-B frame (DF {df_code})."
+
+    # 3. Extract the 24-bit ICAO Aircraft Address (Bytes 1, 2, and 3)
+    icao_address = raw_bytes[1:4].hex().upper()
+
+    # 4. Extract the 56-bit ME Data Payload (Bytes 4 through 10)
+    me_payload = raw_bytes[4:11]
+    
+    # Read Type Code (upper 5 bits of the ME field)
+    type_code = (me_payload[0] >> 3) & 0x1F
+
+    print(f"[*] Demodulating 1090 MHz Link Layer Frame...")
+    print(f"\n[🛰️ Satellite/ADS-B Sky Flag Intercepted]:")
+    print(f" ├── Downlink Format:     DF {df_code} (Mode S Extended Squitter)")
+    print(f" ├── Aircraft Hardware ID: ICAO [0x{icao_address}]")
+    print(f" └── Data Type Code:      Type {type_code}")
+
+    # Process based on Type Code classification matrix
+    if 1 <= type_code <= 4:
+        # Aircraft Identification and Category Message Profile
+        extracted_flag = decode_adsb_callsign_payload(me_payload)
+        print(f" └── [🎁 Target Callsign/Flag]: \"{extracted_flag}\"")
+    elif 9 <= type_code <= 18:
+        print(f" └── [📡 Telemetry Profile]: Contains CPR Airborne Position Data Coordinates.")
+    else:
+        print(f" └── [📝 System Context]: Operational metadata or status vector.")
+    print("-" * 75)
+    
+    return icao_address
+
+if __name__ == "__main__":
+    # --- SIMULATE PHYSICAL SKY INTERCEPT DATA ---
+    # Example 112-bit raw hex string captured from an overhead flight route
+    # Byte 0: 0x8D -> Binary 10001101 -> DF=17 (10001), CA=5 (101)
+    # Bytes 1-3: 0x4840D6 -> Target ICAO Registration Address
+    # Bytes 4-10: ME Payload string containing Type Code 4 + encoded text characters
+    mock_sky_packet = "8D4840D6202CC371C32CE0576098"
+    
+    parse_sky_flag_squitter(mock_sky_packet)
+Use code with caution.
+
+🛡️ Aerospace Deficiencies & Sky Spoofing Realities
+
+From a national infrastructure posture and threat-modeling baseline, terrestrial and space-based ADS-B reveals a massive underlying physical security trade-off:
+1. Complete Absence of Signal Encryption: ADS-B transmissions are entirely cleartext. There are no authentication signatures, handshakes, or cryptographic nonces. Anyone with an inexpensive RTL-SDR USB dongle and a basic whip antenna can monitor the precise flight paths, tail numbers, and speeds of military, commercial, and private aircraft globally.
+2. The Threat of Ghost-Plane RF Injection: Because air traffic systems accept these unauthenticated packets blindly, an auditor with an RF transmitter capable of link-layer 1090 MHz injection can generate validly structured Mode S frames. By injecting fake, moving coordinates into the airwaves, they can paint "ghost planes" directly onto local traffic control monitors, highlighting the need for multi-source verification layers like primary radar and cross-station Multilateration (MLAT).
+
+✅ Sky Flag Extraction Path Verified
+
+The algorithmic pipeline converts raw aerospace packet broadcasts back into structured registry vectors:
+\(\text{Raw\ Hex\ Extended\ Squitter}\longrightarrow \text{Validate\ DF\ ==\ 17}\longrightarrow \text{Isolate\ 24-bit\ ICAO\ Token}\)
+\(\text{Evaluate\ Type\ Code\ 1-4}\longrightarrow \text{Slice\ 6-bit\ Binary\ Chunks}\longrightarrow \text{Map\ to\ Text\ Grid\ Callsign}\)
