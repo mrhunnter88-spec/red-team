@@ -1,1 +1,125 @@
 
+Step 1: The Boot ROM / MCU RE Architecture
+
+Unlike application software, microcontroller code interacts directly with hardware peripherals (like timers, UART serial lines, and flash memory controllers) by writing to specific, hardcoded memory addresses.
+text
+[ Physical Pins / Flash Interface ] <----> [ MMIO Peripherals (GPIO, SPI, Crypto Engine) ]
+                                                            ▲
+                                                            │ Read/Write Memory Bus
+                                                            ▼
+                                           [ 1. Boot ROM / 2. Microcontroller Code ]
+Use code with caution.
+
+Step 2: Step-by-Step Reversing Workflow
+
+
+1. Pinpoint the Reset Vector (Entry Point)
+
+Microcontrollers do not have a traditional operating system loader. When powered on, the processor's program counter automatically jumps to a hardcoded address called the Reset Vector.
+• For ARM Cortex-M processors, the execution model dictates that the absolute start of memory (0x00000000) contains a table called the Vector Table.
+• The first 4 bytes indicate the initial Stack Pointer (SP).
+• The next 4 bytes indicate the Reset Vector (the address where code execution begins).
+If you open a raw Boot ROM dump in a hex editor and see 00 00 01 20 95 01 00 08, the program entry point is 0x08000195 (clearing the lowest bit for ARM Thumb state leaves the true code address at 0x08000194).
+
+2. Locate and Map the MMIO Memory Map
+
+When you load the binary into a decompiler like Ghidra, code lines interacting with hardware peripherals will look like anonymous pointer assignments:
+c
+// Cryptic decompiled output before mapping memory addresses
+*(volatile uint32_t *)0x40021000 |= 0x14;
+Use code with caution.
+To understand what this code is doing, you must download the specific chip vendor's Datasheet or Reference Manual. Search the PDF for the address (0x40021000). You will find that it maps to a specific register, such as the Reset and Clock Control (RCC) register.
+
+3. Define Peripherals inside Ghidra
+
+1. Open the Memory Map panel in Ghidra.
+2. Click Add Block. Name it after the peripheral (e.g., RCC).
+3. Set the base start address to 0x40021000 and specify the block length matching the hardware specification sheets.
+4. Open the Symbol Table or type directly over the pointer variables in the decompiler window, renaming 0x40021000 to RCC_BASE. The cryptic line instantly becomes clear: RCC_BASE->CR |= 0x14; (the program is initializing a hardware clock oscillator).
+
+Step 3: Automating Chip SVD Memory Mapping with Python
+
+Manually typing out hundreds of peripheral register addresses from a reference manual takes too long. Hardware vendors publish SVD (System View Description) files, which are structured XML datasets listing every single memory-mapped register address for a given chip.
+We can use Python inside Ghidra's script manager to read an SVD file and automatically rename all memory locations across our reverse engineering workspace.
+python
+import xml.etree.ElementTree as ET
+
+def auto_map_mcu_registers(svd_xml_path):
+    """
+    Parses a hardware vendor SVD file to generate a map of 
+    memory-mapped IO registers for automated decompiler labeling.
+    """
+    print(f"[*] Parsing target SVD hardware definitions from: {svd_xml_path}")
+    
+    # 1. Load and parse the structured hardware definition tree
+    tree = ET.parse(svd_xml_path)
+    root = tree.getroot()
+    
+    register_memory_map = {}
+    
+    # 2. Extract peripheral structures and base offsets
+    for peripheral in root.findall('.//peripheral'):
+        p_name = peripheral.find('name').text
+        base_address_str = peripheral.find('baseAddress').text
+        base_address = int(base_address_str, 16) if '0x' in base_address_str else int(base_address_str)
+        
+        # 3. Drill down into individual bitfield registers inside the peripheral block
+        for register in peripheral.findall('.//register'):
+            r_name = register.find('name').text
+            offset_str = register.find('addressOffset').text
+            offset = int(offset_str, 16) if '0x' in offset_str else int(offset_str)
+            
+            # Compute the absolute runtime physical memory address mapping
+            absolute_physical_address = base_address + offset
+            symbol_label = f"{p_name}_{r_name}"
+            
+            register_memory_map[absolute_physical_address] = symbol_label
+
+    # 4. Enumerate the dictionary to display what would be applied to Ghidra/IDA API hooks
+    print(f"[+] Successfully extracted {len(register_memory_map)} hardware registers.")
+    print("\n[+] Extracted Mappings Sample (Ready for Decompiler Engine Scripting API):")
+    
+    # Show sample output of first few mappings
+    for addr in sorted(register_memory_map.keys())[:4]:
+        print(f"  Address: {hex(addr)}  ---> Map Symbol To Name: '{register_memory_map[addr]}'")
+
+# --- Local Verification Execution Demonstration ---
+if __name__ == "__main__":
+    import io
+    
+    # Mocking a valid SVD structural XML layout for validation tracking
+    mock_svd = io.StringIO('''<?xml version="1.0"?>
+    <device>
+        <peripherals>
+            <peripheral>
+                <name>GPIOA</name>
+                <baseAddress>0x40020000</baseAddress>
+                <registers>
+                    <register>
+                        <name>MODER</name>
+                        <addressOffset>0x00</addressOffset>
+                    </register>
+                    <register>
+                        <name>ODR</name>
+                        <addressOffset>0x14</addressOffset>
+                    </register>
+                </registers>
+            </peripheral>
+        </peripherals>
+    </device>''')
+    
+    auto_map_mcu_registers(mock_svd)
+Use code with caution.
+
+Step 4: Common Boot ROM Protections & Vulnerabilities
+
+Boot ROMs implement strict roots of trust, verifying cryptographic signatures of incoming application code before booting. Because a Boot ROM cannot be modified or updated after leaving the factory, discovering a security flaw at this level completely breaks the hardware's security model permanently.
+• Glitching Attacks (Fault Injection): Attackers use hardware tools like a ChipWhisperer to momentarily drop the chip's core power supply voltage (VCC) or inject an electromagnetic pulse (EMFI) at the exact instruction clock cycle where the Boot ROM checks the digital signature status register. This can cause the CPU to skip a conditional jump instruction (BNE or JZ), tricking the Boot ROM into booting an unsigned or modified payload.
+• Race Conditions (TOCTOU): The Boot ROM copies application code from external flash memory into fast internal RAM, checks the signature in RAM, and then executes it. If an attacker swaps out the external flash chip contents immediately after the check passes but right before it is executed, the Boot ROM runs unverified code.
+
+Restating the Core Solution Mechanics
+
+
+✅ Boot ROM/MCU RE Principles
+
+Reverse engineering Boot ROMs and microcontrollers requires calculating the Reset Vector from raw memory offsets to locate the execution entry point. You must map Memory-Mapped I/O (MMIO) addresses using hardware datasheets or SVD files to replace raw pointer interactions with descriptive peripheral names.
