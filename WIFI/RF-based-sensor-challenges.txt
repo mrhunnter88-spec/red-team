@@ -1,1 +1,133 @@
 
+🎨 The Multi-Layer Architecture of Wireless Sensor Signals
+
+To harvest unencrypted telemetry data out of thin air, an auditor must systematically reconstruct three physical and structural processing steps:
+
+1. Physical Layer (Demodulation)
+
+Most RF sensors lack the processing power for multi-carrier protocols. Instead, they rely on one of two basic modulation families:
+• OOK / ASK (On-Off Keying / Amplitude Shift Keying): The carrier wave is pulsed on and off at strict intervals (similar to Morse code) to represent bits. Common in home wireless doorbells and basic temperature sensors.
+• FSK / GFSK (Frequency Shift Keying): The transmitter rapidly shifts between two closely spaced frequencies to represent a 0 or a 1. Common in smart utility meters and automotive tire pressure valves.
+
+2. Line Coding Layer (Pulse Width vs. Manchester)
+
+Unlike standard internet data, raw sensor bits cannot be pushed directly onto a radio wave without losing clock synchronization. They apply simple coding rules:
+• Manchester Encoding: A logic 1 is represented by a transition from low-to-high in the middle of a bit window, while a logic 0 is a high-to-low transition. This guarantees a signal flip on every single bit, keeping the receiver's clock perfectly aligned.
+• Pulse Width Modulation (PWM): A long RF pulse followed by a short silence indicates a 1, while a short pulse followed by a long silence indicates a 0.
+
+3. Data Link Layer (Telemetry Payload Framing)
+
+Once the stream of raw bits is restored, it conforms to a highly optimized, compact structural layout:
+text
++---------------------+---------------------+---------------------+---------------------+
+
+
+| Preamble / Sync Bit |  Sensor ID / Serial |  Telemetry Reading  |   CRC / Checksum    |
+| (e.g., 0xAA / Sync) |      (24 Bits)      |  (Temp/Pressure/etc)| (8-bit or 16-bit)   |
++---------------------+---------------------+---------------------+---------------------+
+Use code with caution.
+
+💻 Python Code: Manchester Demodulator & Telemetry Parser
+
+When auditing an RF sensor with a Software Defined Radio, engineers typically capture raw baseband binary pulses using an SDR tool or a logic analyzer. The code below simulates an offline processing backend. Module 1 implements a Manchester data decoder to undo the clock-sync layer. Module 2 breaks open the resulting telemetry frame to extract a hardcoded device serial number and a converted temperature value.
+python
+def decode_manchester_bits(pulse_array):
+    """
+    Decodes a raw, clock-synchronized binary pulse stream utilizing 
+    standard IEEE 802.3 Manchester Encoding rules.
+    Transition Mapping: [0, 1] -> Logic 1  |  [1, 0] -> Logic 0
+    """
+    decoded_bits = []
+    
+    # Process the incoming array in strict 2-element transition windows
+    for i in range(0, len(pulse_array) - 1, 2):
+        pair = pulse_array[i:i+2]
+        
+        if pair == [0, 1]:
+            decoded_bits.append(1)
+        elif pair == [1, 0]:
+            decoded_bits.append(0)
+        else:
+            # An invalid transition indicates signal corruption or noise collision
+            print(f"[!] Warning: Invalid Manchester state transition found at index {i}: {pair}")
+            continue
+            
+    return decoded_bits
+
+def parse_sensor_telemetry(bit_stream):
+    """
+    Parses a reconstructed binary frame from a 433 MHz ambient sensor 
+    to isolate hardware IDs and numeric measurement data fields.
+    """
+    # Convert our list of bits into a clean, flat string for easy slicing
+    bit_str = "".join(map(str, bit_stream))
+    print(f"[*] Raw Decoded Frame Structure ({len(bit_str)} bits): {bit_str}")
+    
+    if len(bit_str) < 40:
+        return "[-] Error: Frame length dropped below minimum structural telemetry boundary."
+        
+    # 1. Isolate the unique 24-bit Sensor Serial/ID (Bits 0 to 23)
+    sensor_id_bin = bit_str[0:24]
+    sensor_serial = int(sensor_id_bin, 2)
+    
+    # 2. Isolate the 12-bit Telemetry Reading field (Bits 24 to 35)
+    # Common implementation: Fixed-point integer representing temperature
+    reading_bin = bit_str[24:36]
+    raw_integer_value = int(reading_bin, 2)
+    
+    # Converted using a standard sensor scaling factor (e.g., dividing by 10 to yield decimals)
+    scaled_temperature_c = raw_integer_value / 10.0
+    
+    # 3. Isolate the remaining trailing bits (Bits 36+) reserved for the checksum
+    checksum_bin = bit_str[36:]
+    
+    print("\n[🌡️ Sub-GHz Wireless Sensor Frame Decoded]:")
+    print(f" ├── Extracted Core Serial ID:  {sensor_serial} (Hex: 0x{sensor_serial:06X})")
+    print(f" ├── Physical Metric Output:    {scaled_temperature_c:.1f}°C")
+    print(f" └── Residual Checksum Mask:   0x{int(checksum_bin, 2):02X}")
+    print("-" * 65)
+    
+    return sensor_serial, scaled_temperature_c
+
+if __name__ == "__main__":
+    # --- PHYSICAL RADIO LAYER SIMULATION ---
+    # Target values we want to encode over our simulated airwaves:
+    # Sensor ID: 524319 (Hex: 0x08001F -> Binary: 000010000000000000011111)
+    # Temperature: 22.5°C -> Packed scaled integer: 225 (Binary: 000011100001)
+    # Remainder dummy parity bits: 1010
+    
+    target_data_stream = [
+        0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,1, # Sensor ID (24 bits)
+        0,0,0,0,1,1,1,0,0,0,0,1,                         # Reading field (12 bits)
+        1,0,1,0                                          # Checksum (4 bits)
+    ]
+    
+    # Apply Manchester encoding transitions over the simulated airwaves:
+    # 1 -> [0, 1] | 0 -> [1, 0]
+    simulated_airwave_pulses = []
+    for bit in target_data_stream:
+        if bit == 1:
+            simulated_airwave_pulses.extend([0, 1])
+        else:
+            simulated_airwave_pulses.extend([1, 0])
+            
+    print(f"[*] Intercepted raw sub-GHz physical pulse timeline ({len(simulated_airwave_pulses)} increments)...")
+    
+    # Step 1: Pass raw electrical pulses through the Manchester decoding block
+    recovered_clean_bits = decode_manchester_bits(simulated_airwave_pulses)
+    
+    # Step 2: Feed the cleaned bitstream into the structural data parser
+    parse_sensor_telemetry(recovered_clean_bits)
+Use code with caution.
+
+🛡️ Critical Infrastructure Vulnerabilities & Hardening
+
+Because industrial and residential sub-GHz sensors are optimized almost exclusively for cost and battery performance, they exhibit severe security architectural vulnerabilities:
+1. Passive Spoofing & Eavesdropping: The vast majority of consumer smart meters (such as older AMR - Automated Meter Reading systems) continuously broadcast precise electric, gas, or water usage figures alongside the physical address serial number in clear text. Anyone driving through a neighborhood with a basic laptop and an RTL-SDR running open-source decoding blocks (like rtl_433) can passively profile a household's daily occupancy patterns.
+2. Signal Replay & Injection Attacks: Many wireless environment monitors and industrial tank gauges lack secure cryptographic handshakes or rolling time-based nonces. If an auditor captures a valid data frame representing a safe metric status and re-injects that exact wave sequence into the airwaves via an SDR transmitter, the collection gateway will accept it blindly, masking real-world physical failure states or system leaks.
+
+✅ Telemetry Extraction Path Verified
+
+The processing script cleanly converts low-level electrical layer transitions back to structural measurements:
+\(\text{Raw\ Physical\ Pulses}\longrightarrow \text{Process\ 2-Bit\ Manchester\ Windows}\longrightarrow \text{Reconstruct\ Clean\ Bit\ Matrix}\)
+\(\text{Telemetry\ Slicing}\longrightarrow \text{Compute\ Decimal\ Integer\ Values}\longrightarrow \text{Output\ Scaled\ Measurement\ Flag}\)
