@@ -1,1 +1,115 @@
 
+🛡️ The Detection Logic
+
+1. Brute-Force Detection (Time Windowing): Track the frequency of failed authentication events (status=401 in web logs, or Failed password in auth logs) coming from a single IP address within a short, moving time window (e.g., more than 20 failures in 60 seconds).
+2. RCE Trace Detection (Process Ancestry): Monitor web server behavior. An HTTP request targeting an endpoint that triggers an immediate outbound network connection or creates a sub-process shell indicates an active RCE exploit (e.g., Log4Shell, Apache Struts, or PHP Web Shell executions).
+
+🐍 Python Code Implementation: Brute-Force & RCE Tracker
+
+The following production-ready tracker checks log buffers for multi-failure brute-force spikes and scans system process structures to catch active web shells or RCE callbacks.
+python
+import time
+import psutil
+from collections import defaultdict, deque
+
+# Brute-force rule thresholds
+TIME_WINDOW_SECS = 60
+FAILED_ATTEMPT_THRESHOLD = 20
+
+# Sliding cache to track login failure times per IP
+# Structure: { ip_address: deque([timestamp1, timestamp2, ...]) }
+failure_tracker = defaultdict(lambda: deque())
+
+def track_brute_force(ip_address: str, event_status: str) -> bool:
+    """
+    Evaluates incoming authentication structures using a moving time window
+    to identify active brute-force or credential stuffing patterns.
+    """
+    if event_status in ["failed", "401"]:
+        current_time = time.time()
+        ip_failures = failure_tracker[ip_address]
+        
+        # Step 1: Append the new failure event timestamp
+        ip_failures.append(current_time)
+        
+        # Step 2: Clean the window — drop timestamps older than our threshold window
+        while ip_failures and ip_failures[0] < current_time - TIME_WINDOW_SECS:
+            ip_failures.popleft()
+            
+        # Step 3: Check frequency threshold limit
+        if len(ip_failures) > FAILED_ATTEMPT_THRESHOLD:
+            print(f"🚨 ALERT: Brute-Force Attack Detected from IP: {ip_address}!")
+            print(f"   ↳ {len(ip_failures)} failed attempts in the last {TIME_WINDOW_SECS} seconds.")
+            return True
+            
+    return False
+
+
+def scan_for_active_rce_traces():
+    """
+    Inspects active runtime process trees to intercept RCE behaviors.
+    Flags instances where web-server workers act as the parent to a system shell.
+    """
+    print("🔍 Snooping process trees for active RCE traces...")
+    
+    # Common web service worker process structures
+    web_server_parents = ["nginx", "apache2", "httpd", "php-fpm", "node", "java"]
+    # Suspicious shell binaries spawned during a reverse-shell or command injection
+    shell_binaries = ["sh", "bash", "zsh", "cmd.exe", "powershell.exe", "whoami", "id"]
+
+    for proc in psutil.process_iter(['pid', 'name', 'ppid']):
+        try:
+            # Step 1: Check if the current process is an interactive shell or system probe
+            if proc.info['name'].lower() in shell_binaries:
+                # Step 2: Identify the parent process structure that spawned it
+                parent_proc = psutil.Process(proc.info['ppid'])
+                parent_name = parent_proc.name().lower()
+                
+                if any(ws in parent_name for ws in web_server_parents):
+                    print(f"🚨 CRITICAL SECURITY ALERT: Potential RCE/Webshell Execution Active!")
+                    print(f"   • Shell Process: {proc.info['name']} (PID: {proc.info['pid']})")
+                    print(f"   • Spawned By Webserver: {parent_name} (PID: {parent_proc.pid})")
+                    print(f"   • Action Required: Isolate host machine immediately.")
+                    
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+# --- Example Driver Execution ---
+if __name__ == "__main__":
+    # Simulate an IP hitting the brute force tracker quickly
+    target_attacker_ip = "198.51.100.42"
+    print("🧪 Simulating brute-force verification pipeline...")
+    for _ in range(25):
+        track_brute_force(target_attacker_ip, "401")
+        
+    # Check running runtime process paths for RCE traces
+    scan_for_active_rce_traces()
+Use code with caution.
+
+🛠️ Triage Speedrun: Command Line Log Auditing
+
+If you need to quickly investigate a web server machine during an ongoing attack, run these commands to instantly surface the logs:
+
+1. Identify SSH Brute Force Sources (Top Failed IPs)
+
+bash
+# Extract IPs from failed SSH login logs, count them, and sort highest first
+grep "Failed password for" /var/log/auth.log | awk '{print $(NF-3)}' | sort | uniq -c | sort -nr | head -n 10
+Use code with caution.
+
+2. Catch RCE Exploit Probes in Web Logs (e.g., whoami, etc/passwd, jndi)
+
+Attackers often test for RCE vulnerabilities by injecting basic execution or discovery commands directly into URL query parameters or HTTP header streams:
+bash
+# Look for common command execution keywords inside your Nginx or Apache access logs
+egrep -i "(whoami|id|cmd\.exe|/bin/bash|sys_eval|passthru|sh\+)" /var/log/nginx/access.log
+Use code with caution.
+
+3. Locate Suspicious Shell Scripts in Common Upload Folders
+
+When an RCE attempt succeeds, the attacker often downloads a persistent shell script into writable temporary directories like /tmp, /dev/shm, or web asset image paths:
+bash
+# Find files modified or created in the last 48 hours within common scratch directories
+find /tmp /dev/shm /var/www/html -type f -mtime -2 -ls
+Use code with caution.
+
