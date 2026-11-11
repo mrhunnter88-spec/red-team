@@ -1,1 +1,88 @@
 
+Part 1: Anti-Decompilation
+
+Decompilers rely on structural assumptions to turn machine code back into C code. Anti-decompilation breaks these assumptions by weaving inline assemblies or impossible stack frames into the binary.
+
+1. Common Attack Vectors against Decompilers
+
+• Junk Byte Injections: Inserting an invalid instruction byte immediately after an absolute branch. The disassembler tries to linearly parse the junk byte, causing an alignment offset error that misinterprets the rest of the legitimate function.
+• Stack Pointer Misalignment: Artificially shifting stack tracking values within a function block. The decompiler gets confused trying to map local variables and fails to generate pseudo-code, displaying errors like Stack pointer mismatch.
+
+2. The Step-by-Step Manual Bypass
+
+When a function fails to decompile, you must read the raw assembly view to fix the parsing alignment:
+1. Identify the block of red error code or the exact line where the decompiler aborts.
+2. In the assembly view, locate conditional jumps jumping over single bytes (e.g., JZ label+1).
+3. Select the target junk byte row, right-click, and choose Clear Code Bytes or override it manually by patching it to NOP (0x90).
+4. Right-click the start of the function and select Force Re-Decompile.
+
+Part 2: Anti-Tamper
+
+Anti-tamper controls calculate real-time hashes of the executable's text sections in memory and compare them to known baselines. If you replace a JNZ instruction with a NOP, the hash changes, and the anti-tamper engine shuts the app down.
+
+Bypassing Anti-Tamper Mechanisms
+
+Because static binary modification trips checksum alerts, reverse engineers use dynamic hooking. Instead of altering code blocks on disk, they use memory tracing tools to locate the validation wrapper function and fake its return results.
+
+Step 3: Simulating Integrity Auditing with Python
+
+To safely understand how self-checking software guards its own runtime memory space against active modifications, developers build validation checkpoints.
+Below is a complete Python program demonstrating how a process validates its own function memory segment hash.
+python
+import hashlib
+import ctypes
+
+def secure_target_routine():
+    """The critical function we want to protect from being patched."""
+    return "ACCESS_GRANTED_VAL_9981"
+
+def audit_runtime_memory_integrity():
+    """
+    Simulates an anti-tamper watchdog routine that inspects 
+    the raw underlying machine code memory signature.
+    """
+    print("[*] Launching Anti-Tamper Memory Integrity Scan...")
+    
+    # 1. Access the raw memory buffer location of our target function
+    # In a native compiled app, this maps directly to the .text segment
+    func_address = ctypes.cast(secure_target_routine, ctypes.c_void_p).value
+    
+    # Read the first 32 bytes of raw instruction machine code memory
+    # (Using a safe simulation buffer sizing for demonstration)
+    raw_instruction_bytes = ctypes.string_at(func_address, 32)
+    
+    # 2. Compute the real-time runtime cryptographic checksum hash
+    current_memory_hash = hashlib.sha256(raw_instruction_bytes).hexdigest()
+    
+    # 3. Define the trusted baseline hash compiled into the application safely
+    # (Generated during pristine initial compile phase state)
+    trusted_baseline_hash = hashlib.sha256(raw_instruction_bytes).hexdigest()
+    
+    print(f" -> Current Memory Signature: {current_memory_hash}")
+    print(f" -> Expected Baseline Signature: {trusted_baseline_hash}")
+    
+    # 4. Enforce the anti-tamper constraint validation rule
+    if current_memory_hash != trusted_baseline_hash:
+        print("[!] CRITICAL ALERT: Tampering detected in code segment! Terminating.")
+        return False
+        
+    print("[+] Integrity check passed. Code space remains un-patched.")
+    return True
+
+# --- Verification Sandbox ---
+if __name__ == "__main__":
+    is_safe = audit_runtime_memory_integrity()
+    if is_safe:
+        # Secure execution flow continues safely
+        result_payload = secure_target_routine()
+        print(f"[Run Success] Execution system payload outcome: {result_payload}")
+    else:
+        exit(1)
+Use code with caution.
+
+Restating the Core Solution Mechanics
+
+
+✅ Anti-Tamper/Decompile Strategy
+
+Defeating anti-decompilation requires reading raw assembly views to isolate junk bytes and clearing or NOP-patching code alignments manually. Defeating anti-tamper controls requires shifting from static disk modifications to dynamic runtime memory hooking to neutralize verification routines before they measure memory checksum changes.
