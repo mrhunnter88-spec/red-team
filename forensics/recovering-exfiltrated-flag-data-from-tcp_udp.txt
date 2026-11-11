@@ -1,1 +1,136 @@
 
+📡 The Three Main Network Exfiltration Methods
+
+1. TCP Stream Splitting: The payload is broken into small chunks and sent over a raw TCP connection. To read it, you must reconstruct the stream sequentially using TCP Sequence Numbers to account for dropped or out-of-order packets.
+2. UDP Blast/Tunneling: Data is dumped inside connectionless UDP payloads. Because UDP doesn't guarantee delivery or ordering, you have to sort the packets manually by time or custom tracking markers.
+3. Protocol Header Stego (Covert Channels): Hidden data isn't in the packet payload at all. Instead, it is converted to ASCII/binary and injected into headers, such as the TCP Source Port, Initial Sequence Number (ISN), or TTL (Time to Live) fields.
+
+🛠️ Step-by-Step Packet Reassembly Logic
+
+1. Ingest Raw PCAP/PCAPNG Data: Load the captured packet file using a low-level parsing engine like scapy.
+2. Filter by Layer & Protocol: Isolate traffic by targeting specific ports, IP addresses, or transport protocols (TCP vs UDP).
+3. Sort and De-duplicate: Group packets by their network conversation flow (Source IP + Port to Destination IP + Port) and order them.
+4. Regex Flag Carving: Run a regex scanner (e.g., FLAG\{.*?\}) across the reassembled payload strings to pull out hidden keys.
+
+🐍 Python Code Implementation: Network Stream Carver
+
+The following script uses scapy to read a PCAP file, sort TCP and UDP flows, rebuild fragmented byte streams, and search for regex flag patterns or covert header-injection arrays.
+python
+# pip install scapy
+from scapy.all import rdpcap, TCP, UDP, IP
+import re
+
+# Define the typical flag format to look for
+FLAG_REGEX = re.compile(r"FLAG\{[A-Za-z0-9_\-\.\!]+\}")
+
+def extract_flags_from_pcap(pcap_path: str):
+    """
+    Parses a network capture file, reconstructs split TCP/UDP payload blocks,
+    and inspects headers for covert channel data exfiltration.
+    """
+    print(f"📦 Loading network packet capture: {pcap_path}")
+    try:
+        packets = rdpcap(pcap_path)
+    except Exception as e:
+        print(f"❌ Failed to parse PCAP file: {e}")
+        return
+
+    # Storage for stream reassembly
+    # Key: (src_ip, src_port, dst_ip, dst_port), Value: List of (seq, payload)
+    tcp_streams = {}
+    udp_streams = {}
+    covert_port_data = []
+
+    print(f"🔍 Analyzing {len(packets)} packets for exfiltration patterns...")
+
+    for pkt in packets:
+        if not pkt.haslayer(IP):
+            continue
+            
+        src_ip = pkt[IP].src
+        dst_ip = pkt[IP].dst
+
+        # --- Method 1: TCP Stream Reconstruction ---
+        if pkt.haslayer(TCP):
+            tcp_layer = pkt[TCP]
+            src_port = tcp_layer.sport
+            dst_port = tcp_layer.dport
+            
+            # Extract header data for Covert Channel Auditing
+            # Attackers sometimes hide characters directly inside changing Source Ports
+            if src_port > 1024:
+                try:
+                    # Check if the port number translates to a readable ASCII character
+                    char = chr(src_port & 0xFF)
+                    covert_port_data.append(char)
+                except ValueError:
+                    pass
+
+            # Extract actual payload data
+            payload = bytes(tcp_layer.payload)
+            if payload:
+                flow_key = (src_ip, src_port, dst_ip, dst_port)
+                if flow_key not in tcp_streams:
+                    tcp_streams[flow_key] = []
+                # Store payload alongside its Sequence number to reorder later
+                tcp_streams[flow_key].append((tcp_layer.seq, payload))
+
+        # --- Method 2: UDP Payload Aggregation ---
+        elif pkt.haslayer(UDP):
+            udp_layer = pkt[UDP]
+            src_port = udp_layer.sport
+            dst_port = udp_layer.dport
+            
+            payload = bytes(udp_layer.payload)
+            if payload:
+                flow_key = (src_ip, src_port, dst_ip, dst_port)
+                if flow_key not in udp_streams:
+                    udp_streams[flow_key] = []
+                udp_streams[flow_key].append(payload)
+
+    # --- Processing Step: Reassemble and Search ---
+    print("\n🧵 Reassembling split streams...")
+    
+    # Process TCP Streams (Sorted by sequence number)
+    for flow, chunks in tcp_streams.items():
+        # Sort chunks by TCP Sequence Number to guarantee structural alignment
+        chunks.sort(key=lambda x: x[0])
+        full_stream_payload = b"".join([item[1] for item in chunks])
+        
+        # Scan for flag artifacts
+        decoded_str = full_stream_payload.decode('utf-8', errors='ignore')
+        matches = FLAG_REGEX.findall(decoded_str)
+        for flag in matches:
+            print(f"🎯 [FOUND IN TCP FLOW {flow[0]}:{flow[1]}]: {flag}")
+
+    # Process UDP Streams (Sorted by packet receipt order)
+    for flow, chunks in udp_streams.items():
+        full_stream_payload = b"".join(chunks)
+        decoded_str = full_stream_payload.decode('utf-8', errors='ignore')
+        matches = FLAG_REGEX.findall(decoded_str)
+        for flag in matches:
+            print(f"🎯 [FOUND IN UDP FLOW {flow[0]}:{flow[1]}]: {flag}")
+
+    # Process Covert Header Channels
+    covert_string = "".join(covert_port_data)
+    header_matches = FLAG_REGEX.findall(covert_string)
+    for flag in header_matches:
+        print(f"🕵️‍♂️ [FOUND IN COVERT PORT HEADER CHANNEL]: {flag}")
+
+# --- Example Call ---
+# extract_flags_from_pcap("suspicious_traffic.pcap")
+Use code with caution.
+
+🛠️ Triage Speedrun: Wireshark CLI Commands (tshark)
+
+If the network capture file is huge (multiple gigabytes), loading it into Python's memory can crash your script. You can use tshark (the command-line tool for Wireshark) to quickly slice through structural packets using native compiled C filters:
+bash
+# 1. Follow and extract a specific TCP stream index directly to a text file
+tshark -r traffic.pcap -q -z follow,tcp,ascii,0 > stream_0.txt
+
+# 2. Extract only hex raw UDP payloads matching a specific destination port
+tshark -r traffic.pcap -Y "udp.dstport == 9001" -T fields -e data | xxd -r -p
+
+# 3. Extract and search for strings matching "FLAG" across all fields natively
+tshark -r traffic.pcap -Y "frame contains \"FLAG\"" -T fields -e text
+Use code with caution.
