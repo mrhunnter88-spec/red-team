@@ -1,1 +1,103 @@
 
+
+🔍 Anatomy of Critical Beacon Flags & Services
+
+A standard beacon contains a 16-bit Capability Information Field composed of specific binary flags:
+text
++---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+
+|ESS|IBS|CFP|CFP|Priv|Short|PBCC|Agil|Spec|Short|DSS |Port|IBSS|Res|
+|   |   | P1| P2|acy |Pream|    |ity |Mgmt| Slot|OFDM|Auth|Fwrd|   |
++---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+Use code with caution.
+
+🛡️ Security Flags (Privacy Flag & RSN IE)
+
+• Privacy Flag (Bit 4): A binary 1 indicates the network requires encryption (WEP, WPA2, WPA3). A binary 0 indicates a completely open network.
+• Robust Security Network (RSN) / IE 48: Contains the actual cipher suites (AES/CCMP, GCMP) and Authentication Key Management (AKM) details. A network advertising WPA3 will broadcast specific AKM values here (e.g., Suite 8 for SAE).
+
+🗺️ Location & Context Services (Interworking / IE 107)
+
+Part of the IEEE 802.11u standard, this profile exposes infrastructure details to cellular offloading engines and public roaming profiles (like Hotspot 2.0 / Passpoint):
+• Access Network Type: Flags if the AP is a free public network, private home network, personal hotspot, or a premium chargeable service.
+• Internet Availability: A 1-bit flag revealing whether the AP provides an outbound route to the global web or loops locally.
+
+🎛️ Network Management Flags
+
+• ESS (Bit 0) vs IBSS (Bit 1): Defines if the device is an infrastructure access point (Extended Service Set) or part of an ad-hoc mesh network (Independent Basic Service Set).
+• Spectrum Management (Bit 8): Flags if the router utilizes IEEE 802.11h mechanisms (DFS - Dynamic Frequency Selection) to dodge military radar frequencies.
+
+💻 Python Code: Parsing Beacon Flags & Micro-Services
+
+The script below uses Scapy to passively sniff the airwaves, break open incoming 802.11 beacon frames, and read the bitmasks within the capability register along with advanced location service tags.
+python
+from scapy.all import sniff, Dot11Beacon, Dot11, Dot11Elt
+import sys
+
+def parse_beacon_flags(packet):
+    """
+    Sniffs wireless traffic, extracts 802.11 Beacon layers, 
+    and interprets the underlying capabilities and service profiles.
+    """
+    if packet.haslayer(Dot11Beacon):
+        ssid = packet[Dot11Elt].info.decode('utf-8', errors='ignore')
+        bssid = packet[Dot11].addr3
+        
+        # 1. Extract the Raw 16-bit Capability Bitmask Integer
+        cap_integer = int(packet[Dot11Beacon].cap)
+        
+        # 2. Binary Bitwise Analysis on Capability Field
+        ess_flag     = bool(cap_integer & 0x0001)      # Bit 0
+        privacy_flag = bool(cap_integer & 0x0010)      # Bit 4
+        short_slot   = bool(cap_integer & 0x0400)      # Bit 10
+        
+        # Determine base layer encryption type
+        security_type = "Encrypted (WPA/WPA2/WPA3)" if privacy_flag else "Open Network"
+
+        print(f"\n[📡 AP Discovered]: {ssid if ssid else '<Hidden SSID>'} [{bssid}]")
+        print(f" ├── Basic Security:     {security_type}")
+        print(f" ├── Infrastructure Mode: {'Yes (ESS)' if ess_flag else 'No (Ad-hoc)'}")
+        print(f" └── High-Speed Slot Time: {'Enabled (Short Slot)' if short_slot else 'Standard'}")
+
+        # 3. Drill down into Information Elements (IE) payloads
+        layer = packet[Dot11Elt]
+        while isinstance(layer, Dot11Elt):
+            # IE ID 48: Robust Security Network (RSN) details
+            if layer.ID == 48:
+                print(" ├── [Security Info]: RSN / WPA2/WPA3 parameters embedded.")
+                
+            # IE ID 107: 802.11u Interworking (Location / Passpoint Services)
+            elif layer.ID == 107:
+                print(" ├── [Service Info]: 802.11u Roaming Capabilities discovered.")
+                try:
+                    # Extract the first byte containing Network Type & Internet options
+                    network_type_byte = layer.info[0]
+                    network_type = network_type_byte & 0x0F  # Lowest 4 bits
+                    internet_bit = (network_type_byte & 0x10) >> 4 # 5th bit
+                    
+                    print(f" │    ├── Access Type ID: {network_type}")
+                    print(f" │    └── Internet Connectivity: {'Yes' if internet_bit == 1 else 'No'}")
+                except IndexError:
+                    pass
+                    
+            layer = layer.payload
+        print("-" * 60)
+
+if __name__ == "__main__":
+    print("[*] Passive Beacon Flag Analyzer Operational...")
+    print("[*] Monitoring wireless structural frames... Press Ctrl+C to terminate.\n")
+    
+    try:
+        # Passively capture management frame layer categories
+        sniff(iface="wlan0mon", prn=parse_beacon_flags, store=0)
+    except PermissionError:
+        print("[-] Error: Root privileges required for raw layer sniffing.")
+    except Exception as e:
+        print(f"[-] Operational failure: {e}")
+Use code with caution.
+
+🛡️ Enterprise Defensive Audit Use-Case
+
+Network administrators monitor beacon flags to audit structural drift across large environments:
+1. Unsigned Configuration Drift: If an enterprise configuration file rolls out incorrectly, some APs might drop the Protected Management Frames (PMF) flag. A tracking engine instantly detects the omission across specific BSSIDs.
+2. Hidden Network Probing Vulnerability: Disabling SSID broadcasting clears the text name from the beacon, but the AP still sends the frame. Security filters scan for beacons with an empty string name to map hidden systems and evaluate client-side vulnerability risks.
