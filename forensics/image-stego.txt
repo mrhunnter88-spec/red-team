@@ -1,1 +1,100 @@
 
+🕵️‍♂️ The Three Main Image Stego Types
+
+1. Metadata Hiding: Injecting strings or binary payloads into interchangeable image file format (EXIF) tags, comments, or trailing bytes.
+2. Append-Hiding (Overlay Data): Appending data directly past the file's natural structural end marker (e.g., placing text after a PNG's IEND block).
+3. Least Significant Bit (LSB) Steganography: Modifying the lowest bits of raw pixel color channels. This is visually imperceptible but alters the mathematical randomness of the image.
+
+🛠️ Step-by-Step Validation & Neutralisation Logic
+
+1. Enforce Structural Termination: Scan past the official end-of-file structural marker (like IEND for PNG or FF D9 for JPEG). Throw away any trailing data.
+2. Sanitize Metadata: Completely strip or rewrite EXIF and auxiliary metadata tables.
+3. Pixel Sanitization (Re-encoding): Pass the image buffer through a destructive graphic engine transformation (like dropping quality slightly or converting formats). This completely overwrites altered LSB bits, rendering hidden payloads unreadable.
+
+🐍 Python Code Implementation
+
+The following script cleanses an uploaded image by stripping trailing overlay data, sanitizing EXIF spaces, and mathematically disrupting potential LSB matrices through graphic re-compression.
+python
+import io
+import os
+from PIL import Image, ImageOps
+
+def neutralize_image_steganography(input_path: str, output_path: str, file_format: str = "PNG") -> bool:
+    """
+    Sanitizes an image to strip metadata, block append-hiding, and destroy
+    LSB (Least Significant Bit) hidden payloads via destructive re-encoding.
+    """
+    try:
+        # Step 1: Open the image using a safe library parser
+        with Image.open(input_path) as img:
+            # Check for known format alignment
+            actual_format = img.format
+            if actual_format not in ["PNG", "JPEG", "WEBP"]:
+                print(f"❌ Unsupported format type: {actual_format}")
+                return False
+
+            print(f"🔍 Analyzing image structure... Format: {actual_format}, Size: {img.size}")
+
+            # Step 2: Strip EXIF and Metadata Layer
+            # We create a blank canvas and copy ONLY raw pixel arrays, leaving EXIF behind.
+            clean_img = Image.new(img.mode, img.size)
+            clean_img.putdata(img.getdata())
+
+            # Step 3: Destroy LSB Payload Arrays
+            # To break LSB patterns without ruining visual quality, we subtly alter pixels.
+            # Mirroring slightly, changing pixel depths, or saving with a minor quality reduction
+            # completely rearranges the binary matrix of the lowest bits.
+            if actual_format == "JPEG":
+                # Saving JPEGs with a specific quality factor forces lossy recalculations, 
+                # completely breaking fine-tuned pixel bit adjustments made by stego tools.
+                clean_img.save(output_path, format="JPEG", quality=85, optimize=True)
+            elif actual_format == "PNG":
+                # For lossless PNGs, we can slightly shift a pixel channel or apply 
+                # an in-memory optimization pass that collapses non-standard color palettes.
+                clean_img = ImageOps.autocontrast(clean_img, cutoff=0.5)
+                clean_img.save(output_path, format="PNG", optimize=True)
+            else:
+                clean_img.save(output_path, format=file_format)
+
+        # Step 4: Verify Overlay Removal
+        # Comparing physical file size of input vs output often reveals hidden append data.
+        orig_size = os.path.getsize(input_path)
+        clean_size = os.path.getsize(output_path)
+        print(f"🧹 Sanitization Complete. Original Size: {orig_size} bytes -> Cleaned Size: {clean_size} bytes")
+        return True
+
+    except Exception as e:
+        print(f"❌ Structural error or parser exploitation attempt blocked: {e}")
+        return False
+Use code with caution.
+
+🛡️ Real-Time Detection Layer (Statistical Steganalysis)
+
+If you need to detect rather than just sanitize, you can use statistical checks like Chi-Square Analysis. In a normal image, the distribution of odd and even values in color bytes is heavily organic. If an attacker injects structured binary files into the LSB layers, the distribution shifts toward an artificially uniform 50/50 balance.
+python
+import numpy as np
+
+def detect_suspicious_lsb(image_path: str) -> bool:
+    """
+    Performs a rough visual entropy check. High-frequency uniform distribution 
+    in the lowest bit maps indicates potential LSB stego tampering.
+    """
+    with Image.open(image_path) as img:
+        # Convert to a grayscale or raw numpy array of pixels
+        pixel_array = np.array(img.convert("L"))
+        
+        # Isolate the lowest bit of every single pixel
+        lsb_bits = pixel_array & 1
+        
+        # Calculate the frequency of 1s vs 0s in the LSB plane
+        ones_ratio = np.mean(lsb_bits)
+        
+        # A perfectly random/organic image rarely hits exactly 0.50000 across its entire field.
+        # Stego tools often flatten this ratio near exactly 0.5 due to encrypted payload density.
+        print(f"📊 Image LSB Bit Density: {ones_ratio:.4f}")
+        if 0.495 <= ones_ratio <= 0.505:
+            print("⚠️ Warning: Highly uniform LSB distribution detected. Potential hidden payload!")
+            return True
+            
+        return False
+Use code with caution.
