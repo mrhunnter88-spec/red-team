@@ -1,1 +1,151 @@
 
+1. Reversing Conditional Logic (if / else)
+
+In assembly, conditions are split into two instructions: a test/comparison that sets CPU flags, and a conditional jump that acts on those flags.
+
+The Assembly Pattern
+
+assembly
+CMP EAX, 0x10         ; Compare the value in EAX to 16
+JLE label_else        ; If EAX is Less than or Equal to 16, jump to else
+MOV EBX, 0x1          ; --- IF BLOCK --- (Executed if EAX > 16)
+JMP label_end         ; Skip past the else block
+label_else:
+MOV EBX, 0x2          ; --- ELSE BLOCK ---
+label_end:
+Use code with caution.
+
+The Extracted Logic (Python/C equivalent)
+
+By identifying the comparison value (0x10) and flipping the logic of the exit jump (JLE means the code continues if greater than), you extract the clean structure:
+python
+if eax > 16:
+    ebx = 1
+else:
+    ebx = 2
+Use code with caution.
+
+2. Reversing Loops (for / while)
+
+Loops look similar to if statements, but the conditional jump points backward to a higher memory address, creating a repetitive execution cycle.
+
+The Assembly Pattern
+
+assembly
+XOR ECX, ECX          ; Set ECX to 0 (Loop counter: i = 0)
+MOV ESI, 0x403000     ; ESI points to the start of an array/string
+loop_start:
+CMP ECX, 0x5          ; Compare counter to 5
+JGE loop_end          ; If ECX >= 5, break out of the loop
+MOV AL, [ESI + ECX]   ; Load character at array index (array[i])
+XOR AL, 0xFF          ; Perform an operation on the byte
+MOV [ESI + ECX], AL   ; Save it back to memory
+INC ECX               ; i++ (Increment counter)
+JMP loop_start        ; Repeat
+loop_end:
+Use code with caution.
+
+The Extracted Logic
+
+Look for the iterator variable initialization, the tracking boundaries, the increment state, and the memory offset updates to deduce:
+python
+# Modifying a 5-byte array in place
+for i in range(5):
+    array[i] = array[i] ^ 0xFF
+Use code with caution.
+
+3. Reversing Structural Pointer Offsets (struct / class)
+
+When a program accesses an object or structure, it tracks a base memory pointer in a register and references fields using fixed numerical offsets (e.g., [RAX + offset]).
+
+The Assembly Pattern
+
+assembly
+MOV RAX, [RBP - 0x10]   ; Load the base address of an object into RAX
+MOV DWORD PTR [RAX], 1  ; Write '1' to offset 0x00
+MOV DWORD PTR [RAX+4], 2; Write '2' to offset 0x04
+MOV BYTE PTR [RAX+8], 0 ; Write '0' to offset 0x08
+Use code with caution.
+
+The Extracted Logic
+
+By identifying the data sizes (DWORD = 4 bytes, BYTE = 1 byte) and mapping the contiguous offset distances, you can reconstruct the underlying data model:
+c
+struct UserProfile {
+    int user_id;      // Offset 0x00 (4 bytes)
+    int access_level; // Offset 0x04 (4 bytes)
+    char is_active;   // Offset 0x08 (1 byte)
+};
+Use code with caution.
+
+4. Automating Assembly Layout Parsing with Python
+
+When reverse engineering large blocks of raw assembly outputs statically, you can write regular expression filters to track data mutations across CPU registers.
+python
+import re
+
+def parse_assembly_to_logic(assembly_lines: list):
+    """
+    Statically tracks simple register state modifications 
+    across a stream of raw disassembly lines.
+    """
+    print("[*] Parsing raw assembly text to register state logic...")
+    
+    # Simple register tracking state dictionary
+    register_state = {"EAX": 0, "EBX": 0}
+    
+    # Regular expressions to match instructions
+    mov_pattern = re.compile(r"MOV\s+(\w+),\s*(0x[0-9A-Fa-f]+|\d+)")
+    add_pattern = re.compile(r"ADD\s+(\w+),\s*(0x[0-9A-Fa-f]+|\d+)")
+    
+    for line in assembly_lines:
+        line = line.strip().upper()
+        
+        # Match "MOV Register, Constant"
+        mov_match = mov_pattern.match(line)
+        if mov_match:
+            reg, val = mov_match.groups()
+            int_val = int(val, 16) if '0X' in val else int(val)
+            register_state[reg] = int_val
+            print(f"  [LOGIC] Variable {reg} assigned value {int_val}")
+            
+        # Match "ADD Register, Constant"
+        add_match = add_pattern.match(line)
+        if add_match:
+            reg, val = add_match.groups()
+            int_val = int(val, 16) if '0X' in val else int(val)
+            register_state[reg] += int_val
+            print(f"  [LOGIC] Variable {reg} incremented by {int_val} (New total: {register_state[reg]})")
+
+    print(f"\n[+] Final Reconstructed State: {register_state}")
+
+if __name__ == "__main__":
+    # Sample assembly block representing a simple calculator routine
+    raw_asm_stream = [
+        "MOV EAX, 10",
+        "ADD EAX, 0x05",
+        "MOV EBX, 0x20"
+    ]
+    parse_assembly_to_logic(raw_asm_stream)
+Use code with caution.
+
+5. Cheat Sheet: Translating Assembly Jump Instructions
+
+To quickly trace logic trees, you must instantly map out common conditional jump instructions to their operational operators:
+
+Assembly Opcode	Description	Operational Condition
+JE / JZ	Jump if Equal / Jump if Zero	==
+JNE / JNZ	Jump Not Equal / Jump Not Zero	!=
+JG / JNLE	Jump Greater / Jump Not Less or Equal	> (Signed)
+JGE / JNL	Jump Greater or Equal / Jump Not Less	>= (Signed)
+JL / JNGE	Jump Less / Jump Not Greater or Equal	< (Signed)
+JA / JNBE	Jump Above / Jump Not Below or Equal	> (Unsigned)
+JB / JNAE	Jump Below / Jump Not Above or Equal	< (Unsigned)
+
+
+Restating the Core Solution Mechanics
+
+
+✅ Assembly-to-Logic Principles
+
+Translating disassembly into abstract program logic relies on isolating the Comparison (CMP/TEST) and Conditional Jump (Jxx) combinations to map if/else structures. Look for backward-directed jumps to isolate loops, and chart fixed numeric base-register offsets ([RAX + Offset]) to reconstruct data objects and custom structures.
