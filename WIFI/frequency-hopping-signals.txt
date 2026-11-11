@@ -1,1 +1,135 @@
 
+🎨 The Architecture of an FHSS System
+
+To execute a clean frequency hopping loop, a transmitter and a receiver must stay perfectly synchronized across two major constraints:
+1. The Frequency Pool (Channels): The total available radio spectrum is carved up into \(N\) discrete, non-overlapping channels. For example, classic Bluetooth slices the 2.4 GHz ISM band into 79 channels, each spaced 1 MHz apart.
+2. The Pseudo-Random Noise (PN) Sequence Generator: To an outside observer with a spectrum analyzer, the signals look like chaotic, fragmented noise bursts. However, the transmitter and receiver share a deterministic algorithm (often driven by a shared cryptographic seed or Linear Feedback Shift Register - LFSR) that computes the exact same frequency map sequentially.
+3. Dwell Time: The specific duration (in milliseconds or microseconds) that a radio stays parked on a single channel before making the next jump.
+	• Slow Hopping: Multiple data bits are bundled and sent together during a single frequency dwell cycle.
+	• Fast Hopping: The hardware hops faster than the individual bit duration, splitting a single bit across multiple distinct frequencies.
+
+💻 Python Code: Simulating an FHSS Transceiver and De-Hopper
+
+The physical-layer simulation below models a cryptographic pseudo-random pattern generator. It uses a shared key to modulate raw binary data across a dynamic frequency pool, illustrating how an authorized receiver pulls the fragmented transmission back into a clear signal while an un-synchronized observer reads garbage data.
+python
+import numpy as np
+
+class FHSSSystem:
+    def __init__(self, shared_seed, total_channels=8, dwell_samples=50):
+        """
+        Initializes an FHSS simulation environment.
+        """
+        self.shared_seed = shared_seed
+        self.total_channels = total_channels
+        self.dwell_samples = dwell_samples
+        
+        # Define a pool of baseband frequencies (in Hz) representing our channels
+        self.frequency_pool = np.linspace(100, 800, total_channels)
+        
+    def _generate_hopping_pattern(self, num_hops):
+        """
+        A Pseudo-Random Number Generator (PRNG) sequence known only to 
+        synchronized hardware nodes.
+        """
+        rng = np.random.default_rng(self.shared_seed)
+        # Generates an ordered map of channel index jumps (e.g., [5, 1, 4, 7...])
+        return rng.choice(self.total_channels, size=num_hops, replace=True)
+
+    def transmit(self, binary_data):
+        """
+        Transmits data by shifting carrier frequencies based on the PN seed.
+        Modulation: Basic Frequency Shift Keying (FSK) combined with FHSS.
+        """
+        num_hops = len(binary_data)
+        hopping_pattern = self._generate_hopping_pattern(num_hops)
+        
+        t = np.linspace(0, 1, self.dwell_samples, endpoint=False)
+        tx_signal = []
+        
+        print("[*] Transmitter generating hopping sequence...")
+        
+        for idx, bit in enumerate(binary_data):
+            # 1. Determine the base hopping channel from the shared pattern
+            current_channel_idx = hopping_pattern[idx]
+            base_carrier_freq = self.frequency_pool[current_channel_idx]
+            
+            # 2. Layer the actual payload data on top (FSK manipulation)
+            # If bit is 1, shift up slightly; if 0, stay at base channel frequency
+            modulated_freq = base_carrier_freq + (20 if bit == 1 else 0)
+            
+            # 3. Synthesize the raw waveform segment
+            wave_segment = np.sin(2 * np.pi * modulated_freq * t)
+            tx_signal.extend(wave_segment)
+            
+        return np.array(tx_signal), hopping_pattern
+
+    def receive_dehop(self, rx_signal, receiver_seed):
+        """
+        The De-Hopping Puzzle: Recombines the signal if the seeds match.
+        Filters out noise by matching frequencies exactly in time.
+        """
+        num_hops = len(rx_signal) // self.dwell_samples
+        
+        # Authorized receiver generates the expected pattern using the shared seed
+        rng = np.random.default_rng(receiver_seed)
+        expected_pattern = rng.choice(self.total_channels, size=num_hops, replace=True)
+        
+        t = np.linspace(0, 1, self.dwell_samples, endpoint=False)
+        recovered_bits = []
+        
+        for idx in range(num_hops):
+            # Isolate the signal segment matching the current dwell window
+            segment = rx_signal[idx * self.dwell_samples : (idx + 1) * self.dwell_samples]
+            
+            # Identify which frequency channel the receiver should be listening to
+            assigned_channel_idx = expected_pattern[idx]
+            expected_base_freq = self.frequency_pool[assigned_channel_idx]
+            
+            # Test both potential data frequency states (Bit 0 vs Bit 1)
+            ref_wave_0 = np.sin(2 * np.pi * expected_base_freq * t)
+            ref_wave_1 = np.sin(2 * np.pi * (expected_base_freq + 20) * t)
+            
+            # Coherent cross-correlation matching to determine the closest state
+            match_0 = np.sum(segment * ref_wave_0)
+            match_1 = np.sum(segment * ref_wave_1)
+            
+            if match_1 > match_0:
+                recovered_bits.append(1)
+            else:
+                recovered_bits.append(0)
+                
+        return recovered_bits
+
+# --- Execution Matrix ---
+if __name__ == "__main__":
+    # Cryptographic pattern sync key
+    SECRET_NETWORK_SEED = 948123  
+    UNAUTHORIZED_SEED   = 111111  
+    
+    # 7-bit binary payload tracking sequence
+    payload_stream = [1, 0, 1, 1, 0, 0, 1]
+    
+    # Instantiate physical layer simulation pipeline
+    sdr_node = FHSSSystem(shared_seed=SECRET_NETWORK_SEED, total_channels=8)
+    
+    # 1. Generate and transmit the hopping raw wave
+    airwave_signal, actual_pattern = sdr_node.transmit(payload_stream)
+    print(f"[+] Signal emitted over airwaves. Chosen Channel Path: {actual_pattern}")
+    
+    # 2. Legitimate Receiver tries to listen (Synchronized Seed)
+    trusted_output = sdr_node.receive_dehop(airwave_signal, receiver_seed=SECRET_NETWORK_SEED)
+    print(f"\n[🔒 Authorized Sync Receiver Decode]: {trusted_output}")
+    
+    # 3. Third-party Eavesdropper tries to listen (Wrong Seed / Unsynchronized)
+    interceptor_output = sdr_node.receive_dehop(airwave_signal, receiver_seed=UNAUTHORIZED_SEED)
+    print(f"[❌ Unsynchronized Eavesdropper Decode]: {interceptor_output}")
+Use code with caution.
+
+🛡️ Modern Security Enhancements: AFH (Adaptive Frequency Hopping)
+
+In deployment environments like modern Bluetooth, static pseudo-random hopping faces challenges because parts of the 2.4 GHz band are often saturated by fixed Wi-Fi routers, creating packet loss.
+To solve this, modern chips use Adaptive Frequency Hopping (AFH):
+• Channel Assessment: The receiver tracks packet loss and signal-to-noise ratios across the hopping sequence.
+• Dynamic Mapping: If a channel (e.g., Channel 12) consistently shows high interference from a nearby home Wi-Fi network, the channel is marked as "bad."
+• Sequence Pruning: The PRNG dynamically rewrites its internal algorithm mapping table to skip Channel 12 entirely, adapting the hopping pattern around active obstacles on the fly without breaking link layer synchronization.
+
