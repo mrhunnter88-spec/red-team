@@ -1,1 +1,134 @@
 
+Step 1: The Progression of Decompiled Code
+
+To understand the impact of refactoring, observe how a function evolves from raw, unreadable machine output into a clean logic block:
+
+1. Raw Machine Decompilation (Unrefactored)
+
+c
+undefined4 FUN_00401120(undefined4 param_1, int param_2) {
+    int iVar1;
+    undefined4 uVar2;
+    
+    iVar1 = 0;
+    if (param_2 < 8) {
+        do {
+            *(char *)(iVar1 + param_1) = *(char *)(iVar1 + param_1) ^ 0x5a;
+            iVar1 = iVar1 + 1;
+        } while (iVar1 < param_2);
+        uVar2 = 1;
+    } else {
+        uVar2 = 0;
+    }
+    return uVar2;
+}
+Use code with caution.
+
+2. Fully Refactored Code (Clean Logic)
+
+c
+bool decrypt_buffer(char *data_buffer, int buffer_length) {
+    int current_index = 0;
+    
+    if (buffer_length >= 8) {
+        return false; // Error: Buffer length constraint violation
+    }
+    
+    do {
+        data_buffer[current_index] = data_buffer[current_index] ^ 0x5A; // Inline XOR decryption
+        current_index++;
+    } while (current_index < buffer_length);
+    
+    return true; // Decryption successful
+}
+Use code with caution.
+
+Step 2: Step-by-Step Refactoring Workflow
+
+When cleaning up a function in a tool like Ghidra or IDA Pro, apply changes in this specific sequence to maintain structural accuracy:
+
+1. Rename Function Arguments Based on Context
+
+Look at how function arguments (param_1, param_2) are used:
+• If param_2 is checked in loops (iVar1 < param_2) or compared against maximum constraints, it represents a size or limit. Press L on param_2 and rename it to buffer_size or length.
+• If param_1 is used as a base pointer to access indexed bytes (*(char *)(iVar1 + param_1)), it is an array or data pointer. Rename it to data_ptr or input_str.
+
+2. Identify and Propagate Local Variable Types
+
+By default, decompilers default to generic sizes like int or undefined4. Fix these allocations to unlock clean syntax transformations:
+• Right-click param_1, select Retype Variable, and change it from undefined4 to char *.
+• Watch the decompiler automatically clean up the pointer syntax. Complex pointer math like *(char *)(iVar1 + param_1) = ... instantly transforms into clean array syntax: param_1[iVar1] = ....
+
+3. Eradicate "Magic Numbers"
+
+Raw hexadecimal values scattered throughout the code obscure the developer's intent. Replace them with standard labels:
+• If you see 0x5A, check if it's used uniformly across files as a static XOR_KEY.
+• If you see a parameter like 4 or 2 inside socket connection blocks, right-click the number and select Set Equate to map it to its true system constant (e.g., changing 2 to AF_INET for IPv4).
+
+Step 3: Automating Code Normalisation with Python
+
+When exporting rough pseudo-code from an analysis engine into a repository, you can use a Python script to automatically clean up recurring decompiler artifacts and apply standardized naming style conventions.
+python
+import re
+
+def normalize_decompiled_syntax(raw_pseudo_code: str) -> str:
+    """
+    Statically cleans up common decompiler artifacts and normalizes
+    variable expressions for higher level readability.
+    """
+    print("[*] Launching pseudo-code normalization pipeline...")
+    
+    cleaned_code = raw_pseudo_code
+    
+    # 1. Replace generic variable prefixes with standardized pseudonyms
+    # Turns iVar1, iVar2 into local_int_1, local_int_2
+    cleaned_code = re.sub(r'\biVar(\d+)\b', r'local_int_\1', cleaned_code)
+    
+    # Turns uVar1, uVar2 into local_uint_1, local_uint_2
+    cleaned_code = re.sub(r'\buVar(\d+)\b', r'local_uint_\1', cleaned_code)
+    
+    # 2. Reformat ugly pointer updates into standard increment operators
+    # Change "variable = variable + 1;" to "variable++;"
+    cleaned_code = re.sub(r'(\s*)(\w+)\s*=\s*\2\s*\+\s*1\s*;', r'\1\2++;', cleaned_code)
+    
+    # 3. Simplify standard type assignments
+    type_mappings = {
+        "undefined4": "uint32_t",
+        "undefined1": "uint8_t",
+        "longlong": "int64_t"
+    }
+    
+    for raw_type, clean_type in type_mappings.items():
+        cleaned_code = cleaned_code.replace(raw_type, clean_type)
+        
+    return cleaned_code
+
+# --- Verification Sandbox Run ---
+if __name__ == "__main__":
+    rough_input = """
+    undefined4 process_data(undefined4 param_1) {
+        int iVar1;
+        iVar1 = 0;
+        iVar1 = iVar1 + 1;
+        return param_1;
+    }
+    """
+    
+    refactored_output = normalize_decompiled_syntax(rough_input)
+    print("\n[+] Reconstructed Pseudo-Code Output:")
+    print(refactored_output)
+Use code with caution.
+
+Step 4: Struct Reconstruction (The Ultimate Readability Fix)
+
+When dealing with compound data structures, rename variables individually to stop layout bloat. If you notice a base register offset accessing elements continuously at 4-byte steps (*(int *)(base + 0), *(int *)(base + 4)), declare a custom structure layout:
+1. In Ghidra's Data Type Manager, right-click your binary project file header node and choose New -> Structure.
+2. Define fields that match the exact component type and sizes discovered during your analysis.
+3. Apply this new structure type to the function parameter. The messy pointer offsets across the entire code block will automatically clean up into explicit field notations: base->user_id, base->session_token.
+
+Restating the Core Solution Mechanics
+
+
+✅ Refactoring Engine Rules
+
+Refactoring for readability relies on retyping base addresses (e.g., int to char*) to trigger clean array syntax transformations inside the decompiler framework. Map raw variables to descriptive alternatives using structural context clues, and replace obscure magic integers with standard system definitions (AF_INET, PROT_READ) to turn raw pseudo-code into maintainable source models.
