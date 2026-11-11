@@ -1,1 +1,134 @@
 
+📡 The Structural Architecture of a POCSAG Transmission
+
+To decode a raw audio bitstream into readable alphanumeric strings, an automated receiver must parse three explicit structural blocks:
+text
++-----------------------+-----------------------+-----------------------+
+
+|  Preamble (576 Bits)  |   Batch 1 (16 Words)  |   Batch 2 (16 Words)  |
+|  01010101...01010101  |  [Sync Word] [Frames] |  [Sync Word] [Frames] |
++-----------------------+-----------------------+-----------------------+
+Use code with caution.
+1. The Preamble: A string of \(576\) alternating bits (01010101...) used solely to wake up the pager's receiver circuitry and sync the internal clock.
+2. The Batch: Data is packaged into sequential batches. Every single batch must begin with a specific \(32\text{-bit}\) synchronization string (0x7CD215D8).
+3. The Codewords: Each batch holds \(16\) codewords split into \(8\) distinct frames (pairs of \(2\) codewords). There are two categories of codewords:
+	• Address Codeword (Bit 0 = 0): Contains the pager's unique identification code (RIC / Capcode) and the intended function flags.
+	• Message Codeword (Bit 0 = 1): Holds the underlying payload data (numeric BCD format or 7-bit ASCII text strings).
+
+🧠 The Error Correction Puzzle: Bose-Chaudhuri-Hocquenghem (BCH)
+
+Every POCSAG codeword utilizes a 32-bit vector framed as a \(\text{BCH}(31, 21)\) error-correction block combined with an extra parity bit:
+• Bits 1–21: Payload data (\(21\text{ bits}\)).
+• Bits 22–31: Parity check bits (\(10\text{ bits}\) computed via systematic cyclic redundancy codes).
+• Bit 32: Even parity bit (\(1\text{ bit}\)).
+Before extracting characters, automated decoders parse these error-correction algorithms to ensure ambient static or radio interference hasn't flipped critical integers over the airwaves.
+
+💻 Python Code: Parsing a Raw POCSAG Batch Binary Stream
+
+The following script models a physical layer digital processing engine. It takes a raw bitstream captured from a radio receiver (such as an SDR tuned to a local pager frequency), validates the batch structure, detects address/message states, and decodes the packed \(7\text{-bit}\) characters into readable text.
+python
+import numpy as np
+
+def decode_pocsag_7bit_ascii(payload_bits):
+    """
+    Decodes raw message bits into 7-bit ASCII characters.
+    POCSAG text is packed inversely from least-significant bit (LSB) first.
+    """
+    chars = []
+    # Loop through the bits in 7-bit chunks
+    for i in range(0, len(payload_bits) - 6, 7):
+        bit_chunk = payload_bits[i:i+7]
+        # Reverse the bit-order because POCSAG maps LSB to MSB over the air
+        bit_chunk = bit_chunk[::-1]
+        
+        # Convert the binary array into an integer byte value
+        char_code = int("".join(map(str, bit_chunk)), 2)
+        
+        if char_code == 0:  # Null terminator
+            break
+        # Filter non-printable control characters for safety
+        if 32 <= char_code <= 126:
+            chars.append(chr(char_code))
+        else:
+            chars.append(".") # Placeholder for custom control symbols or flags
+            
+    return "".join(chars)
+
+def process_pocsag_bitstream(raw_bits):
+    """
+    Parses a synchronized binary sequence to identify 
+    Address and Message codewords.
+    """
+    # Standard POCSAG 32-bit Synchronization Word
+    SYNC_WORD_HEX = "7cd215d8"
+    sync_word_bin = bin(int(SYNC_WORD_HEX, 16))[2:].zfill(32)
+    sync_bits = [int(b) for b in sync_word_bin]
+    
+    print(f"[*] Analyzing bitstream segment of length: {len(raw_bits)} bits")
+    
+    # Locate the batch start marker by looking for the Sync Word
+    # (In a real SDR script, this scans a moving correlation window)
+    for i in range(len(raw_bits) - 32):
+        if raw_bits[i:i+32] == list(sync_bits):
+            print(f"[+] Found Batch Synchronization Pointer at bit index: {i}")
+            batch_data = raw_bits[i+32 : i+32+(16*32)] # Extract the 16 following codewords
+            
+            # Process each 32-bit codeword block within the batch
+            for word_idx in range(16):
+                codeword = batch_data[word_idx*32 : (word_idx+1)*32]
+                if len(codeword) < 32:
+                    break
+                
+                # Check Bit 0 to determine the frame classification type
+                is_message_type = (codeword[0] == 1)
+                
+                # Extract the 20-bit core payload block (Bits 1 through 20)
+                core_payload = codeword[1:21]
+                
+                if not is_message_type:
+                    # Address Codeword processing logic
+                    address_val = int("".join(map(str, core_payload)), 2)
+                    print(f" ├── [Frame {word_idx//2}] Address Codeword -> Capcode/RIC: {address_val}")
+                else:
+                    # Message Codeword processing logic
+                    message_text = decode_pocsag_7bit_ascii(core_payload)
+                    print(f" └── [Frame {word_idx//2}] Message Codeword -> Extracted Text: '{message_text}'")
+            return
+            
+    print("[-] Synchronization failed: No valid POCSAG batch markers found.")
+
+if __name__ == "__main__":
+    # --- TEST DEPLOYMENT MATRIX ---
+    # 1. Simulate a standard POCSAG sync word frame
+    SYNC_BITS = [0,1,1,1,1,1,0,0,1,1,0,1,0,0,1,0,0,0,0,1,0,1,0,1,1,1,0,1,1,0,0,0] # 0x7CD215D8
+    
+    # 2. Simulate an Address Codeword (Bit 0 = 0, followed by a test integer Capcode ID)
+    # Binary representation of Capcode 45209 + padding to fill 20 bits
+    address_bits = [0] + [0,0,0,0,1,0,1,1,0,0,0,0,1,0,0,1,1,0,0,1] + [0]*11 
+    
+    # 3. Simulate a Message Codeword (Bit 0 = 1, followed by "TEST" in inverted 7-bit ASCII format)
+    # 'T' (0x54 -> 1010100 -> LSB-First: 0010101)
+    # 'E' (0x45 -> 1000101 -> LSB-First: 1010001)
+    # 'S' (0x53 -> 1010011 -> LSB-First: 1100101)
+    # 'T' (0x54 -> 1010100 -> LSB-First: 0010101)
+    text_bits = [1,0,1,0,1] + [1,0,1,0,0,0,1] + [1,1,0,0,1,0,1] + [0,0,1,0,1]  # Complete 20-bit packet string block
+    message_bits = [1] + text_bits + [0]*11                                     # Append standard parities
+    
+    # Assemble the physical simulation frame layer sequence
+    mock_radio_bitstream = [0,1,0,1,0,1] * 20 + SYNC_BITS + address_bits + message_bits
+    
+    # Process and decode the synthetic radio data stream
+    process_pocsag_bitstream(mock_radio_bitstream)
+Use code with caution.
+
+🛡️ Deficiencies and Defensive Architecture
+
+Because POCSAG was engineered in the late 20th century, it introduces significant modern corporate threat vectors [1]:
+• Total Lack of Encryption: Pager text payloads broadcast clear text natively [1]. Automated scrapers can index message histories across vast distances without entering a local area network boundary.
+• Lack of Authentication: The protocol doesn't enforce sender authentication vectors. A basic Software Defined Radio capable of signal injection can spoof address frames, triggering fake priority alarms on pagers within a multi-kilometre radius.
+
+✅ Final Result Summary
+
+The alphanumeric extraction logic translates raw link-layer bit shifts back to human-readable parameters:
+\(\text{Bit\ }0=0\longrightarrow \text{Parse\ Address\ Vector}\)
+\(\text{Bit\ }0=1\longrightarrow \text{Reverse\ Bit\ Alignment}\longrightarrow \text{Map\ 7-bit\ ASCII\ Blocks}\)
