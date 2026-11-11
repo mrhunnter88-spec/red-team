@@ -1,1 +1,78 @@
 
+Step 1: The Target Program Logic (What's Inside)
+
+Imagine you encounter a compiled program. To understand what a reverse engineer sees, consider this simple verification algorithm written under the hood:
+1. It requests a username and a license key.
+2. It loops through each character of the username, grabs its ASCII numeric value, adds 15 to it, and multiplies it by 3.
+3. It formats the resulting numbers into a string separated by dashes.
+4. It compares your input key with this calculated value.
+
+Step 2: Step-by-Step Reverse Engineering Process
+
+When inspecting this program inside a disassembler or decompiler (like Ghidra or IDA Pro), you reverse engineer the logic step-by-step:
+
+1. Locate the Entry Point
+
+Search for string literals in the binary such as "Enter Key:", "Invalid Key!", or "Success!". Following these string references will lead you directly to the main verification function.
+
+2. Analyze the Assembly / Decompiled Control Flow
+
+Look closely at the instructions preceding the "Success" window. You will typically find a conditional loop and a comparison statement.
+In a decompiled view, you might see a pseudo-code block resembling this:
+c
+// Decompiled representation found in the binary
+int len = strlen(username);
+for (int i = 0; i < len; i++) {
+    int transformation = (username[i] + 15) * 3;
+    sprintf(expected_key_buffer, "%d-", transformation);
+}
+Use code with caution.
+
+3. Deduce the Math Formula
+
+By looking at the arithmetic operations (ADD, IMUL) executed inside the assembly loop, you deduce the formula used to validate the key against the username.
+• Formula: \(\text{Key Segment} = (\text{ASCII Value} + 15) \times 3\)
+
+Step 3: Automating the Solution with Python
+
+Instead of manually calculating a key every time, you can write a Keygen script in Python to generate valid keys instantly for any given username.
+python
+def generate_valid_key(username: str) -> str:
+    """
+    Replicates the reverse-engineered logic of the target binary
+    to generate a valid license key based on a username.
+    """
+    # Enforce basic validation constraints found during analysis
+    if len(username) < 3:
+        return "Username must be at least 3 characters long."
+        
+    key_segments = []
+    
+    # Process each character using the reversed algorithm
+    for char in username:
+        ascii_val = ord(char)                # Get ASCII integer value
+        transformed_val = (ascii_val + 15) * 3  # Apply the extracted formula
+        key_segments.append(str(transformed_val))
+        
+    # Join the final parts with dashes as expected by the program
+    serial_key = "-".join(key_segments)
+    return serial_key
+
+# --- Demonstration execution ---
+if __name__ == "__main__":
+    test_user = "ALICE"
+    generated_serial = generate_valid_key(test_user)
+    
+    print(f"[*] Target Username: {test_user}")
+    print(f"[+] Generated Valid Key: {generated_serial}")
+Use code with caution.
+
+Explaining the Keygen Output Math
+
+If you input the username "ALICE", here is exactly how the script calculates the valid key step-by-step:
+• 'A' \(\rightarrow 65 \rightarrow (65 + 15) \times 3 = \mathbf{240}\)
+• 'L' \(\rightarrow 76 \rightarrow (76 + 15) \times 3 = \mathbf{273}\)
+• 'I' \(\rightarrow 73 \rightarrow (73 + 15) \times 3 = \mathbf{264}\)
+• 'C' \(\rightarrow 67 \rightarrow (67 + 15) \times 3 = \mathbf{246}\)
+• 'E' \(\rightarrow 69 \rightarrow (69 + 15) \times 3 = \mathbf{252}\)
+The final valid key for the program becomes: 240-273-264-246-252. Entering this string bypasses the check and triggers the success routine.
