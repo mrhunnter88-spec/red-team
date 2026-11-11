@@ -1,1 +1,141 @@
 
+Step 1: The Target Custom Crypto Loop (C Source)
+
+Consider this typical custom encryption loop inside a crackme binary. It encrypts a user-supplied flag string using a multi-step bitwise operation combined with an index-based modifier.
+c
+#include <stdio.h>
+#include <string.h>
+
+// The hardcoded target ciphertext found in the binary's data section
+unsigned char encrypted_flag[] = {0x14, 0x3b, 0x3f, 0x22, 0x1d, 0x47, 0x14, 0x27}; 
+
+void check_flag(char *input) {
+    int len = strlen(input);
+    if (len != 8) return;
+
+    for (int i = 0; i < len; i++) {
+        // Custom Crypto Loop: XOR with a fixed key, then add the loop index
+        unsigned char transformed = (input[i] ^ 0x5A) + i; 
+        
+        if (transformed != encrypted_flag[i]) {
+            printf("Wrong flag!\n");
+            return;
+        }
+    }
+    printf("Correct flag!\n");
+}
+Use code with caution.
+
+Step 2: Step-by-Step Analysis Process
+
+
+1. Locate the Encrypted Ciphertext
+
+Open the binary in a decompiler like Ghidra. Navigate to the data segment (.rodata or .data) to locate the stream of hex bytes representing the encrypted target.
+• Extracted Bytes: [0x14, 0x3b, 0x3f, 0x22, 0x1d, 0x47, 0x14, 0x27]
+
+2. Analyze the Loop Assembly / Decompiled Math
+
+Look for bitwise assembly operators inside the loop checking block:
+• XOR instructions (represented by ^ in decompiled C or xor in assembly).
+• ADD or SUB instructions (add, sub).
+• Bit-shifting instructions like SHL, SHR, ROL, or ROR.
+In our target, the math operation applied to each input byte \(P_{i}\) to get ciphertext \(C_{i}\) at index \(i\) is:
+\(C_{i}=(P_{i}\oplus 0x5A)+i\)
+
+3. Deriving the Inverse Mathematical Formula
+
+To decrypt the ciphertext and find the correct input, we must mathematically reverse the encryption operations in the exact reverse order:
+1. First, subtract the loop index \(i\) from the ciphertext byte: \(C_i - i\)
+2. Second, reverse the XOR operation. Since XOR is its own inverse (\(A \oplus B \oplus B = A\)), we XOR the result with the same key (\(0x5A\)):
+\(P_{i}=(C_{i}-i)\oplus 0x5A\)
+
+Step 3: Automating the Solution with Python
+
+We use Python to loop through the extracted ciphertext bytes, apply our derived inverse formula, and output the decoded flag.
+python
+def decrypt_custom_crypto():
+    # 1. Hardcoded ciphertext bytes extracted from the binary
+    encrypted_flag = [0x14, 0x3b, 0x3f, 0x22, 0x1d, 0x47, 0x14, 0x27]
+    
+    # 2. Key extracted from the binary
+    xor_key = 0x5A
+    
+    decoded_chars = []
+    
+    # 3. Apply the reversed mathematical transformations
+    for i, cipher_byte in enumerate(encrypted_flag):
+        # Step A: Reverse the addition step (subtract index)
+        step1 = (cipher_byte - i) & 0xFF  # Masking with 0xFF handles underflows cleanly
+        
+        # Step B: Reverse the XOR step
+        plain_byte = step1 ^ xor_key
+        
+        # Convert the numeric ASCII value back to a character
+        decoded_chars.append(chr(plain_byte))
+        
+    # Join characters to form the string
+    flag = "".join(decoded_chars)
+    return flag
+
+if __name__ == "__main__":
+    resolved_flag = decrypt_custom_crypto()
+    print(f"[*] Extracted Flag/Input: {resolved_flag}")
+Use code with caution.
+
+Explaining the Reverse Math Execution
+
+Let us trace the math for the very first two bytes of the cipher stream:
+• Index 0: Ciphertext = 0x14 (20)
+	1. Subtract index: $20 - 0 = 20$ (0x14)
+	2. XOR with key: 0x14 $\oplus$ 0x5A = 0x4E $\rightarrow$ ASCII character 'N'
+• Index 1: Ciphertext = 0x3b (59)
+	1. Subtract index: $59 - 1 = 58$ (0x3A)
+	2. XOR with key: 0x3A $\oplus$ 0x5A = 0x60 $\rightarrow$ ASCII character '`'
+
+Step 4: Solving Non-Reversible Loops via SAT Solvers
+
+Sometimes custom loops are highly complex, containing non-invertible mutations, mixing state variables, or running for thousands of iterations. When math cannot be manually inverted, reverse engineers use the Z3 Theorem Prover (z3-solver) to let a SAT solver brute-force the logic for them.
+
+The Z3 Solver Solution Script
+
+python
+from z3 import *
+
+def solve_with_z3():
+    encrypted_flag = [0x14, 0x3b, 0x3f, 0x22, 0x1d, 0x47, 0x14, 0x27]
+    solver = Solver()
+    
+    # Create 8 symbolic byte variables representing our unknown input characters
+    input_chars = [BitVec(f'char_{i}', 8) for i in range(8)]
+    
+    # Add constraints: Input must be printable ASCII text
+    for char in input_chars:
+        solver.add(char >= 32, char <= 126)
+        
+    # Define the custom crypto loop rules inside Z3
+    for i in range(8):
+        # Replicate the binary's forward execution logic exactly
+        transformed = (input_chars[i] ^ 0x5A) + i
+        
+        # Constrain the symbolic result to match the known ciphertext value
+        solver.add(transformed == encrypted_flag[i])
+        
+    # Check if a mathematical solution exists
+    if solver.check() == sat:
+        model = solver.model()
+        # Extract the solved character values ordered by index
+        flag = "".join([chr(model[char].as_long()) for char in input_chars])
+        return flag
+    else:
+        return "Unsolvable constraints"
+
+print(f"[+] Z3 Solved Flag/Input: {solve_with_z3()}")
+Use code with caution.
+
+Restating the Core Solution Mechanics
+
+
+✅ Crypto Reverse Engineering Mechanism
+
+Solving custom crypto binaries relies on finding the embedded ciphertext payload and the key parameters inside a disassembler, then scripting either an inverse mathematical pipeline or setting up a symbolic SAT solver system to isolate the exact string required to pass the constraint verification.
