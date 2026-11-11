@@ -1,1 +1,110 @@
 
+🌐 Protocol Exfiltration Vectors
+
+• HTTP: Data is embedded inside custom Request Headers, user-agent strings, query parameters (?data=...), or compressed within POST bodies.
+• DNS (Tunneling): Data is broken into small chunks and encoded (Base32/Base64/Hex) as subdomains within a look-up request (e.g., [encoded_flag].attacker.com).
+• FTP: Payloads are passed directly inside cleartext data channel sockets (PORT/PASV command streams).
+• SMB: Files or data streams travel via network shares or alternate data streams (ADS) inside hidden network files.
+• TLS (Encrypted Streams): Traffic appears completely scrambled. You must inject a pre-master secret log file (SSLKEYLOGFILE) into a parsing engine to decrypt the handshake and reveal the underlying application layer.
+
+🐍 Python Code Implementation: Multi-Protocol Network Artifact Carver
+
+The script below parses multiple protocol layers from a PCAP file to pull out exfiltrated flags or hidden network strings.
+python
+# pip install scapy
+from scapy.all import rdpcap, IP, TCP, UDP
+import re
+import base64
+
+FLAG_REGEX = re.compile(r"FLAG\{[A-Za-z0-9_\-\.\!]+\}")
+
+def parse_application_protocols(pcap_path: str):
+    """
+    Parses application layer structures (HTTP, DNS, FTP) out of raw packet captures.
+    """
+    print(f"📦 Analyzing application layers in: {pcap_path}")
+    try:
+        packets = rdpcap(pcap_path)
+    except Exception as e:
+        print(f"❌ Error reading PCAP: {e}")
+        return
+
+    for idx, pkt in enumerate(packets):
+        if not pkt.haslayer(IP):
+            continue
+            
+        # --- 1. DNS Tunneling Parsing ---
+        if pkt.haslayer(UDP) and (pkt[UDP].dport == 53 or pkt[UDP].sport == 53):
+            raw_payload = bytes(pkt[UDP].payload)
+            # Basic look for strings inside the raw DNS payload matrix
+            # Specifically searching for queries containing standard encoding markers
+            try:
+                dns_text = raw_payload.decode('utf-8', errors='ignore')
+                # Grab domain string patterns
+                domains = re.findall(r'([a-zA-Z0-9\-]{4,}\.)+[a-zA-Z]{2,}', dns_text)
+                for domain in domains:
+                    # In CTFs/Real attacks, subdomains contain base64 string segments
+                    # Example: FLAG in hex/base64 injected as a subdomain string
+                    if "flag" in domain.lower():
+                        print(f"🎯 [DNS Query Match]: Potential exfiltration signature found in domain payload string")
+            except Exception:
+                pass
+
+        # --- 2. HTTP / FTP Layer Extraction ---
+        elif pkt.haslayer(TCP):
+            tcp_layer = pkt[TCP]
+            payload = bytes(tcp_layer.payload)
+            if not payload:
+                continue
+
+            try:
+                decoded_payload = payload.decode('utf-8', errors='ignore')
+                
+                # HTTP Check
+                if "HTTP/" in decoded_payload or "GET " in decoded_payload or "POST " in decoded_payload:
+                    # Scan entire raw HTTP block (Headers, Cookies, Body)
+                    matches = FLAG_REGEX.findall(decoded_payload)
+                    for flag in matches:
+                        print(f"🎯 [HTTP Layer Found]: {flag}")
+                        
+                # FTP Command/Data Tracking Check
+                elif any(cmd in decoded_payload for cmd in ["USER ", "PASS ", "STOR ", "RETR ", "220 ", "230 "]):
+                    matches = FLAG_REGEX.findall(decoded_payload)
+                    for flag in matches:
+                        print(f"🎯 [FTP Control Stream Found]: {flag}")
+            except Exception:
+                pass
+
+# --- Example Exec ---
+# parse_application_protocols("application_traffic.pcap")
+Use code with caution.
+
+🛡️ Reconstructing Deep Protocols (SMB & Decrypted TLS) Using Tshark
+
+As structures like SMB (Server Message Block) and TLS scale up in complexity, manual byte-parsing in pure Python becomes highly error-prone. The standard security engineering practice is to offload these structures to tshark (the command-line interface for Wireshark).
+
+1. Carving Transferred Files Directly Out of SMB Streams
+
+If an attacker transfers an image or document containing flag data across a network share using SMB, tshark can track the file system blocks and export the completed document directly to disk:
+bash
+# Automatically reconstructs and carves out all objects transferred over SMB
+tshark -r network_capture.pcap --export-objects smb,./exported_smb_files/
+Use code with caution.
+
+2. Decrypting TLS 1.2 / TLS 1.3 Traffic Encrypted Tunnels
+
+If you have captured traffic but it is wrapped inside a TLS session, you can decode the ciphertext by passing the client browser's extracted cryptographic key logging structure (sslkeylog.log) directly into the parser:
+bash
+# Decrypts TLS traffic on the fly and searches the plaintext inner stream for the flag pattern
+tshark -r encrypted_traffic.pcap \
+       -o "tls.keylog_file: ./sslkeylog.log" \
+       -Y "http or tls" \
+       -T fields -e text | grep "FLAG{"
+Use code with caution.
+
+3. Stripping out HTTP Objects
+
+bash
+# Automatically combs decrypted or plain text HTTP traffic and saves downloaded payloads
+tshark -r network_capture.pcap --export-objects http,./exported_web_files/
+Use code with caution.
