@@ -1,1 +1,82 @@
 
+🛡️ How Rogue AP Probing and Identification Works
+
+To identify if an Evil Twin is operating in an environment, security systems look for specific anomalies across the wireless spectrum:
+1. BSSID Duplication (Split-Signal Anomaly): A standard physical space usually maps one specific BSSID (MAC address) to a predictable signal strength range. If an administrator detects the exact same BSSID broadcasting from two drastically different signal strengths (RSSI) or on different channels, it indicates a rogue clone.
+2. Probe Request Harvesting: When your phone leaves your home, it constantly broadcasts "Probe Requests" asking: "Are you there, Home_WiFi?" A rogue AP listens to these probes and dynamically reconfigures itself to spoof the requested name, tricking the device into connecting.
+3. Sequence Number Analysis: Every Wi-Fi frame contains a sequential counter. If a legitimate AP is at frame sequence 1420, and a rogue AP suddenly injects a frame with sequence 0001 using the same MAC address, an IDS flags a sequence number anomaly.
+
+💻 Python Code: Wireless IDS Rogue AP Detector
+
+The following script uses the Scapy library to act as a defensive passive probe monitor. It sniffs the airwaves for beacon frames and flags an alert if it detects a duplicate SSID operating on a conflicting channel or MAC address—the classic signature of an Evil Twin attempt.
+python
+from scapy.all import sniff, Dot11Beacon, Dot11, Dot11Elt
+import sys
+
+# Dictionary to track mapped networks: { SSID: (BSSID, Channel) }
+observed_networks = {}
+
+def process_packet(packet):
+    """
+    Passively monitors 802.11 Beacon frames to detect 
+    SSID spoofing and Rogue Access Points.
+    """
+    # Check if the frame is a wireless Beacon frame
+    if packet.haslayer(Dot11Beacon):
+        bssid = packet[Dot11].addr3  # The hardware MAC address of the AP
+        ssid = packet[Dot11Elt].info.decode('utf-8', errors='ignore') # Network Name
+        
+        # Extract the channel attribute from the beacon's layer components
+        channel = 0
+        layer = packet[Dot11Elt]
+        while isinstance(layer, Dot11Elt):
+            if layer.ID == 3:  # ID 3 corresponds to the DS Parameter Set (Channel)
+                channel = int(layer.info[0])
+                break
+            layer = layer.payload
+
+        # Ignore anonymous hidden networks
+        if not ssid:
+            return
+
+        # Defensive Verification Logic
+        if ssid in observed_networks:
+            original_bssid, original_channel = observed_networks[ssid]
+            
+            # Scenario A: Same SSID but a completely different hardware MAC address
+            if original_bssid != bssid:
+                print(f"\n[⚠️ ALERT] POSSIBLE EVIL TWIN DETECTED!")
+                print(f"   Network Name (SSID): {ssid}")
+                print(f"   Legitimate BSSID:   {original_bssid} (Chan: {original_channel})")
+                print(f"   Suspicious Rogue BSSID: {bssid} (Chan: {channel})")
+                print("-" * 50)
+                
+            # Scenario B: Same MAC and SSID but operating on an unexpected channel
+            elif original_channel != channel:
+                print(f"\n[⚠️ ALERT] CHANNEL MISMATCH / ROGUE PROBE!")
+                print(f"   AP {ssid} ({bssid}) moved from Channel {original_channel} to {channel}.")
+        else:
+            # Map the trusted baseline state during initial scan
+            observed_networks[ssid] = (bssid, channel)
+            print(f"[*] Mapping Baseline Network -> SSID: {ssid:20} | BSSID: {bssid} | Channel: {channel}")
+
+if __name__ == "__main__":
+    print("[*] Initializing Wireless Intrusion Detection Probe...")
+    print("[*] Sniffing 802.11 Airwaves passively... Press Ctrl+C to stop.\n")
+    
+    try:
+        # Sniff requires the network interface to be in Monitor Mode (e.g., wlan0mon)
+        # Change 'wlan0mon' to your local network monitoring interface card
+        sniff(iface="wlan0mon", prn=process_packet, store=0)
+    except PermissionError:
+        print("[-] System Error: Root privileges required to capture raw link-layer frames.")
+    except Exception as e:
+        print(f"[-] Execution stopped: {e}")
+Use code with caution.
+
+🏢 Enterprise Mitigation Strategies
+
+Organizations use Wireless Intrusion Prevention Systems (WIPS) to actively counter rogue devices:
+• Mutual Authentication (802.1X): Instead of a shared password (WPA2-PSK), corporate networks use certificates. Even if an attacker matches the SSID, they cannot fake the RADIUS server authentication backend, rendering the Evil Twin useless.
+• Automated Containment: Upon detecting an unauthorized BSSID broadcasting a corporate SSID, enterprise APs send continuous spoofed Deauthentication frames directly to the rogue hardware, legally shielding corporate clients from associating with it.
+
