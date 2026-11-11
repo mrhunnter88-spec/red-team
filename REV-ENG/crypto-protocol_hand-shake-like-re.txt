@@ -1,1 +1,144 @@
 
+Step 1: The Cryptographic Handshake State Machine
+
+Most cryptographic handshakes follow a distinct structural sequence across a client and server model to prevent eavesdropping and modification:
+text
+ Client Machine                                              Server Binary
+   [ Generate Ephemeral ]                                       [ Generate Ephemeral ]
+   [ Private/Public Key ]                                       [ Private/Public Key ]
+            │                                                            │
+            ▼                                                            ▼
+    ( ClientHello )     ───► [ Magic Bytes + Client PubKey ] ───►  ( Read ClientHello )
+                                                                         │
+            ▲                                                            ▼
+   ( Read ServerHello ) ◄─── [ Server PubKey + Signature ]  ◄───   ( ServerHello )
+            │                                                            │
+            ▼                                                            ▼
+   [ Derive Shared Secret ]                                     [ Derive Shared Secret ]
+   [ Compute Session Key  ]                                     [ Compute Session Key  ]
+            │                                                            │
+            ▼                                                            ▼
+   [ Ciphertext Transmission ] ◄──────────────────────────────► [ Ciphertext Transmission ]
+Use code with caution.
+
+Step 2: Step-by-Step Analysis Flow
+
+
+1. Identify Handshake State Variables
+
+Because handshakes occur over multiple packet transmissions, the server binary tracks progress using a State Variable stored in a session structure. Look inside your decompiler (Ghidra or IDA Pro) for a switch statement or a jump table managing constants like:
+• 0x00 = STATE_INIT (Awaiting ClientHello)
+• 0x01 = STATE_EXPECT_KEY_EXCHANGE
+• 0x02 = STATE_AUTHENTICATED
+
+2. Pinpoint Cryptographic Primitives via Constants
+
+Instead of looking at complex math operations, look for distinct initialization constants or lookup tables matching standardized algorithms:
+• AES (Advanced Encryption Standard): Look for the S-Box initialization array or constants like 0x63, 0x7C, 0x77, 0x7B.
+• MD5 / SHA-1 / SHA-256: Look for fractional part constant magic words (e.g., 0x6A09E667, 0xBB67AE85 for SHA-256).
+• Curve25519 / Elliptic Curves: Look for large prime modular values such as \(2^{255}-19\) (0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFED).
+
+3. Locate the Validation Defect
+
+Cryptographic handshakes rarely have vulnerabilities in the core math of algorithms like AES or RSA; instead, flaws exist in the protocol implementation logic:
+• Static Nonces/IVs: The application uses a hardcoded initialization vector (IV) or nonce for every session, making the stream cipher vulnerable to replay attacks.
+• Flawed Signature Verification: The code executes a verification routine like RSAVerify(), but the conditional statement checking the return value contains a structural bug that assumes failure is success or ignores an error code.
+
+Step 3: Automating Handshake Simulation with Python
+
+To analyze a handshake, you must replicate its network execution steps. Below is a Python script that models a custom Diffie-Hellman Key Exchange handshake to calculate a shared session key used to decrypt succeeding binary packets.
+python
+import os
+import hashlib
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+# 1. Shared Global Parameters Found Statically in the Binary
+# Public Generator (g) and Public Prime (p)
+G = 2
+P = 0xFFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3BE39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6955817183995497CEA956AE515D2261898FA051015728E5A8AACAA68FFFFFFFFFFFFFFFF
+
+def simulate_handshake_session():
+    print("[*] Initiating Cryptographic Handshake Emulation...")
+    
+    # --- STEP A: CLIENT HANDSHAKE GENERATION (Our Script) ---
+    # Generate an ephemeral private integer
+    client_private = int.from_bytes(os.urandom(32), byteorder='big')
+    # Compute Public Key: A = (g^a) mod p
+    client_public = pow(G, client_private, P)
+    
+    # --- STEP B: SIMULATE SERVER RESPONSE (Extracted Binary Logic) ---
+    # Imagine retrieving this value from a ServerHello response packet
+    server_private_mock = int.from_bytes(os.urandom(32), byteorder='big')
+    server_public = pow(G, server_private_mock, P)
+    print(f" -> Received Server Public Key: {hex(server_public)[:32]}...")
+    
+    # --- STEP C: DERIVE SHARED SECRET ---
+    # Client calculates: Secret = (B^a) mod p
+    shared_secret = pow(server_public, client_private, P)
+    shared_secret_bytes = shared_secret.to_bytes(256, byteorder='big')
+    
+    # Derive actual symmetric key using a Key Derivation Function (KDF) like SHA-256
+    session_key = hashlib.sha256(shared_secret_bytes).digest()
+    print(f"[+] Successfully Derived AES-256 Session Key: {session_key.hex()}")
+    
+    # --- STEP D: DECRYPTING AN INCOMING PROTOCOL PACKET ---
+    # Example encrypted data payload from server stream
+    mock_iv = b"SECURE_INIT_IV12" # 16 bytes
+    
+    # Encrypted ciphertext structure payload
+    # Setting up sample raw decryption context
+    cipher = Cipher(algorithms.AES(session_key), modes.CBC(mock_iv))
+    decryptor = cipher.decryptor()
+    
+    # Return verification structures
+    return session_key
+
+if __name__ == "__main__":
+    derived_key = simulate_handshake_session()
+Use code with caution.
+
+Step 4: Hooking the Handshake Context dynamically
+
+If you don't want to write script loops to extract keys manually, you can use dynamic memory hooking via Python and Frida to print out the keys directly at the moment they are generated inside the memory space.
+Look inside the binary for the API functions wrapping key handling operations (such as DH_compute_key, BCryptSecretAgreement, or a custom validation function like derive_session_keys).
+python
+import sys
+import frida
+
+js_crypto_hook = """
+// 1. Locate the native function by symbol or memory offset address
+var target_module = "custom_service_binary";
+var function_symbol = "derive_session_keys";
+
+var func_address = Module.findExportByName(target_module, function_symbol);
+
+if (func_address) {
+    Interceptor.attach(func_address, {
+        onEnter: function (args) {
+            console.log("\\n[+] Intercepted Handshake Key Derivation Function!");
+            // In typical C calling conventions, args holds a pointer to the key buffer
+            var out_key_buffer_ptr = args; 
+            this.saved_key_ptr = out_key_buffer_ptr;
+        },
+        onLeave: function (retval) {
+            // Read memory values right after the calculation concludes
+            if (!this.saved_key_ptr.isNull()) {
+                var derived_bytes = Memory.readByteArray(this.saved_key_ptr, 32);
+                console.log("[*] Extracted Session Key from RAM: ");
+                console.log(hexdump(derived_bytes, { offset: 0, length: 32, header: true, ansi: false }));
+            }
+        }
+    });
+} else {
+    console.log("[-] Target function symbol not found. Check address mappings.");
+}
+"""
+# Standard Frida process attachment templates execute this payload against target pids
+Use code with caution.
+
+Restating the Core Solution Mechanics
+
+
+✅ Crypto-Protocol Deconstruction Rule
+
+Analyzing custom crypto handshakes relies on tracking the State Variable machine transitions inside a loop to view step-by-step logic progression. Identify specific primitives via mathematical constant structures (like SHA or AES magic initialization vectors), and use dynamic memory hooks to capture raw session secrets straight out of RAM buffers, avoiding complex offline mathematical inversion entirely.
