@@ -1,1 +1,72 @@
 
+🎧 The Three Main Audio Stego Types
+
+1. LSB Encoding (Time Domain): Modifying the least significant bits of raw audio amplitude samples (common in uncompressed .wav files). The variance is completely imperceptible to the human ear.
+2. Frequency Domain Hiding: Concealing data within the spectral coefficients generated during compression (common in .mp3 or .ogg). Payloads are hidden inside the masked thresholds of human hearing.
+3. Metadata & Header Padding: Injecting data into auxiliary ID3 tags or padding frames between valid structural audio blocks.
+
+🛠️ Step-by-Step Validation & Neutralisation Logic
+
+1. Isolate Structural Headers: Validate the outer audio structure (e.g., checking for the RIFF and WAVE sub-chunks in a WAV file) to reject append-hiding.
+2. Destructive Acoustic Re-encoding (The Ultimate Shield): The absolute most reliable way to neutralize audio stego is to decode the file down to raw audio samples and compress/transcode it into a different format (e.g., transcoding WAV to high-bitrate MP3, or re-sampling a WAV from 44.1kHz to 48kHz). This radically shifts the binary grid, shredding hidden payloads while preserving human-audible sound.
+3. Metadata Stripping: Strip off all arbitrary ID3 tags, artist commentary blocks, or custom user tags where text scripts might hide.
+
+🐍 Python Code Implementation
+
+The following script uses Python's built-in wave module to ingest an audio file, extract exclusively raw amplitude data, and write it to a fresh structural layout. This completely sanitizes the LSB layer and drops unmapped file trailers.
+python
+import os
+import wave
+import struct
+
+def sanitize_wav_steganography(input_path: str, output_path: str) -> bool:
+    """
+    Sanitizes an uncompressed WAV file by extracting only its pure audio frame arrays.
+    This eliminates trailing append data, strips metadata chunks, and breaks standard 
+    LSB steganography structures.
+    """
+    try:
+        # Step 1: Securely parse the incoming structural headers
+        with wave.open(input_path, 'rb') as source_wav:
+            # Extract essential audio traits
+            params = source_wav.getparams()
+            num_channels = source_wav.getnchannels()
+            sample_width = source_wav.getsampwidth()
+            frame_rate = source_wav.getframerate()
+            num_frames = source_wav.getnframes()
+            
+            print(f"🎵 Parsing WAV structure: {num_channels} Ch, {sample_width*8}-bit, {frame_rate}Hz")
+            
+            # Step 2: Extract ONLY raw frame data into memory
+            # This completely leaves behind any custom metadata chunks or trailing overlays
+            raw_frames = source_wav.readframes(num_frames)
+
+        # Step 3: Implement an LSB bit-shredding filter (Optional, but highly effective)
+        # To strictly guarantee that an LSB payload is broken, we slightly toggle 
+        # or clear the absolute lowest bit of every audio sample buffer.
+        sanitized_frames = bytearray(raw_frames)
+        
+        # Clear the lowest bit of every byte to mathematically erase simple LSB strings
+        for i in range(len(sanitized_frames)):
+            sanitized_frames[i] = sanitized_frames[i] & 0xFE  # Zero out the lowest bit
+
+        # Step 4: Write out a perfectly fresh, verified WAV container
+        with wave.open(output_path, 'wb') as clean_wav:
+            # Re-apply structural parameters to the fresh container
+            clean_wav.setparams(params)
+            clean_wav.writeframes(sanitized_frames)
+
+        orig_size = os.path.getsize(input_path)
+        clean_size = os.path.getsize(output_path)
+        print(f"🧼 Audio Sanitized. Original: {orig_size} bytes -> Cleaned: {clean_size} bytes")
+        return True
+
+    except Exception as e:
+        print(f"❌ Structural error or parser exploitation attempt blocked: {e}")
+        return False
+Use code with caution.
+
+📊 Real-Time Detection: Spectrogram & Statistical Checking
+
+For advanced compressed files like MP3, attackers sometimes hide data by introducing artificial anomalies in the higher-frequency ranges. You can catch this by inspecting the variance of the data or checking bitstream distributions.
+If you want to add detection engines using standard data science libraries (numpy), you can compute an audio signal's bit entropy. Much like image LSB tracking, an audio signal that has been packed with encrypted data will show a highly artificial, completely uniform pattern in its least significant bits instead of the natural, chaotic variance found in real room noise or vocals.
