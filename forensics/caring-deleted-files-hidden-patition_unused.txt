@@ -1,1 +1,115 @@
 
+
+🛠️ The Carving & Discovery Logic
+
+1. Locate Hidden Partition Gaps: Inspect the partition boundaries using sector math. If Partition 1 ends at sector 100,000 and Partition 2 starts at sector 300,000, there are 200,000 unallocated sectors where data can be hidden.
+2. Extract the Target Block: Slice out that raw unallocated space into a standalone file block.
+3. Scan for Structural Headers: Run a continuous byte-matching scanner to identify file headers (e.g., \x89PNG) and track the stream down to its trailing footer (IEND).
+4. Carve out the Block: Save the extracted bytes to a new file, recovering it entirely from the dark sectors.
+
+🐍 Python Code Implementation: Raw Sector File Carver
+
+The script below reads raw binary chunks from an unallocated space file or raw disk image, looks for matching file header structures, and carves them out automatically.
+python
+import os
+
+# Definitions for file signatures to search for in unallocated space
+CARVING_RULES = {
+    "png": {"header": b"\x89PNG\r\n\x1a\n", "footer": b"IEND\xaeB`\x82"},
+    "jpg": {"header": b"\xff\xd8\xff", "footer": b"\xff\xd9"},
+    "pdf": {"header": b"%PDF-", "footer": b"%%EOF"}
+}
+
+def carve_deleted_files(disk_image_path: str, start_byte_offset: int, size_to_scan: int, output_dir: str = "./carved_deleted"):
+    """
+    Scans a specific raw chunk of a disk image (like a hidden partition gap) 
+    and extracts deleted files based on binary structure signatures.
+    """
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    print(f"🕵️‍♂️ Scanning raw sectors at offset {start_byte_offset}...")
+    carved_count = 0
+
+    try:
+        with open(disk_image_path, "rb") as disk:
+            # Jump straight to the beginning of the unallocated/hidden block
+            disk.seek(start_byte_offset)
+            raw_data = disk.read(size_to_scan)
+
+            print(f"📖 Loaded {len(raw_data)} bytes of unallocated space into the carver engine.")
+
+            # Scan the buffer for each file type signature
+            for ext, sigs in CARVING_RULES.items():
+                start_pos = 0
+                
+                while True:
+                    # Find the next occurring file header signature
+                    header_idx = raw_data.find(sigs["header"], start_pos)
+                    if header_idx == -1:
+                        break  # No more files of this type in this block
+                    
+                    # Find the closing file footer structure past the header
+                    footer_idx = raw_data.find(sigs["footer"], header_idx)
+                    if footer_idx != -1:
+                        # Include the length of the footer marker in our file size calculation
+                        end_boundary = footer_idx + len(sigs["footer"])
+                        file_bytes = raw_data[header_idx:end_boundary]
+                        
+                        carved_count += 1
+                        out_path = os.path.join(output_dir, f"carved_deleted_{carved_count}.{ext}")
+                        
+                        with open(out_path, "wb") as out_file:
+                            out_file.write(file_bytes)
+                            
+                        print(f"🎯 [CARVED DELETED FILE]: Recovered a .{ext} ({len(file_bytes)} bytes) at offset {start_byte_offset + header_idx}")
+                        
+                        # Move forward past this file block
+                        start_pos = end_boundary
+                    else:
+                        # Header found but no footer; skip past this header to prevent an infinite loop
+                        start_pos = header_idx + len(sigs["header"])
+
+        print(f"🧹 Carving sequence finished. Total files recovered: {carved_count}")
+
+    except IOError as e:
+        print(f"❌ Disk access error: {e}")
+
+# --- Example Mathematical Workflow Configuration ---
+# If your partition tool tells you there is hidden unallocated space between 
+# sector 2048 and sector 4096:
+# start_offset = 2048 * 512 (bytes per sector) = 1048576
+# size = (4096 - 2048) * 512 = 1048576 bytes
+# carve_deleted_files("compromised_disk.img", start_byte_offset=1048576, size_to_scan=1048576)
+Use code with caution.
+
+🛡️ Industry-Standard Forensic Tools for Carving
+
+When dealing with severe file fragmentation (where a deleted file is split into non-contiguous sectors across the drive), pure sequential byte parsing will pull out corrupted objects. To handle complex file recovery automatically, use these pre-compiled forensic engines:
+
+1. Scalpel (Configuration-Driven Carver)
+
+Scalpel is a fast file carver that reads a configuration file (/etc/scalpel/scalpel.conf) where you can uncomment exactly which file formats you want to pull from an image. It handles multi-threading and extracts data without touching file system indices:
+bash
+# Carve files out of a raw image using default configuration settings
+scalpel -c scalpel.conf -o ./carved_output/ compromised_disk.img
+Use code with caution.
+
+2. Foremost (Highly Resilient to Slack Space)
+
+Foremost excels at scraping raw disk structures and unallocated partition space. It ignores the underlying partition table entirely, treating the whole image as a giant block stream:
+bash
+# Scan a disk image and look specifically for png and pdf files inside all unallocated tracks
+foremost -t png,pdf -i compromised_disk.img -o ./recovered_evidence/
+Use code with caution.
+
+3. Extraction via blkls (The Sleuth Kit)
+
+If you specifically want to parse only the unallocated space and ignore active files (saving massive amounts of storage space and time), use TSK to isolate the free sectors first:
+bash
+# Step A: Extract all unallocated data blocks out into a standalone raw stream file
+blkls compromised_disk.img > unallocated_space.raw
+
+# Step B: Pass only the deleted space file into foremost for clean sorting
+foremost -i unallocated_space.raw -o ./deleted_only_files/
+Use code with caution.
