@@ -1,1 +1,108 @@
 
+📄 The Three Main Document Stego Tactics
+
+1. Hidden Object/Increment Appending: Injecting malicious data or unindexed streams at the very end of a document file (past the formal physical closing tag) or within hidden structural blocks (like /OpenAction or /JavaScript tables in PDFs).
+2. Invisible Text and Layout Hacks: Hiding text arrays inside the document space by setting the text color to match the page background (white on white), setting font sizes to zero, or applying hidden opacity settings.
+3. OpenXML Directory Injection: Exploiting modern zipped document structures (like .docx) by manually injecting malicious scripts or images into secondary folders (e.g., inside the word/_rels/ or customXml/ paths) that Microsoft Word ignores during normal rendering.
+
+🛠️ Step-by-Step Validation & Neutralisation Logic
+
+The most robust way to handle document stego in security gateways is a process called Content Disarm and Reconstruction (CDR).
+1. Verify Binary Closure: Scan for structural termination tags (e.g., %%EOF for PDFs) and strip anything appended past that line.
+2. Convert to a Flat Stream (The Hardening Shield): For maximum security, rasterise or flatten incoming documents. Converting an untrusted PDF or Word document into a flat array of safe images (e.g., using pdf2image), and then re-assembling them into a brand-new PDF, destroys all macrocode, tracking pixels, hidden zero-font text layers, and embedded malware objects.
+3. Purge Relationship Directories: For Office files, parse the container as an archive, check the XML schema definitions, and delete unmapped object blocks or macros (vbaProject.bin).
+
+🐍 Python Code Implementation: PDF CDR Engine
+
+The script below performs a defensive flattening pass on an incoming PDF. It extracts the visual contents of the pages, drops all active scripts, forms, hidden incremental layers, and metadata, and generates a structurally pristine document.
+python
+import os
+import pypdf
+from pdf2image import convert_from_path
+
+def sanitize_pdf_steganography(input_path: str, output_path: str) -> bool:
+    """
+    Sanitizes a PDF using Content Disarm & Reconstruction (CDR). 
+    Converts pages to high-resolution raster images to destroy hidden objects,
+    white-on-white text, and trailing payloads, then outputs a safe PDF.
+    """
+    if not os.path.exists(input_path):
+        print("❌ Input document path does not exist.")
+        return False
+
+    print(f"📄 Defensively sanitizing document structure: {os.path.basename(input_path)}")
+    
+    try:
+        # Step 1: Pre-check for trail-appending anomalies
+        with open(input_path, "rb") as f:
+            content = f.read()
+            # If the PDF has multiple %%EOF markers, it likely contains hidden incremental updates
+            if content.count(b"%%EOF") > 1:
+                print("⚠️ Structural Alert: Multiple EOF boundaries detected. Potential tracking/stego payload.")
+
+        # Step 2: Flatten the Document (Destroys macros, JS, hidden fonts, white text)
+        # Note: Requires 'poppler' to be installed on your operating system path
+        pages = convert_from_path(input_path, dpi=200)
+        
+        if not pages:
+            print("❌ Failed to parse or render document pages.")
+            return False
+
+        # Convert the first image page and initialize the fresh output sequence
+        first_page = pages[0].convert("RGB")
+        remaining_pages = [p.convert("RGB") for p in pages[1:]]
+
+        # Step 3: Write to a brand-new structural canvas
+        # This builds a fresh PDF format tree from scratch, dropping all ancient metadata
+        first_page.save(
+            output_path, 
+            save_all=True, 
+            append_images=remaining_pages, 
+            resolution=200, 
+            quality=90
+        )
+
+        orig_size = os.path.getsize(input_path)
+        clean_size = os.path.getsize(output_path)
+        print("🧼 Document Flattening and Disarm Complete!")
+        print(f"   Original Size: {orig_size} bytes -> Sanitized Size: {clean_size} bytes")
+        return True
+
+    except Exception as e:
+        print(f"❌ Parser Exploitation or CDR Engine Error: {e}")
+        return False
+Use code with caution.
+
+📊 Real-Time Detection: Office XML Structure Inspection
+
+If you need to analyze modern Microsoft Office files (.docx, .xlsx) for hidden folder injections without flattening them, you can combine archive inspection logic with schema validation:
+python
+import zipfile
+
+def detect_office_stego_anomalies(file_path: str) -> bool:
+    """
+    Inspects the internal zip structure of an Office OpenXML file 
+    to scan for macro code binaries or unmapped file blocks.
+    """
+    try:
+        with zipfile.ZipFile(file_path, 'r') as doc_zip:
+            file_list = doc_zip.namelist()
+            
+            for internal_file in file_list:
+                # 1. Macro detection
+                if "vbaProject.bin" in internal_file:
+                    print("⚠️ Security Warning: Embedded VBA Macro project file found!")
+                    return True
+                
+                # 2. Hidden executable payloads masquerading as normal assets
+                if internal_file.startswith("word/media/") or internal_file.startswith("xl/media/"):
+                    if not internal_file.lower().endswith(('.png', '.jpeg', '.jpg', '.emf', '.wmf')):
+                        print(f"⚠️ Security Warning: Strange non-image asset hidden in media folder: {internal_file}")
+                        return True
+                        
+        print("✅ Archive directory map looks consistent with normal OpenXML standards.")
+        return False
+    except Exception as e:
+        print(f"Error parsing document archive map: {e}")
+        return True
+Use code with caution.
