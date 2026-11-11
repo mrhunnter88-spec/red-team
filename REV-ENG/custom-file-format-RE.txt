@@ -1,1 +1,149 @@
 
+Step 1: Structural Anatomy of a Custom Container Format
+
+Most custom compound file formats follow a nested architecture designed to pack multiple resources into a single file system archive wrapper:
+text
++-------------------+-------------------+-------------------+-------------------+
+
+|    FILE HEADER    | TABLE OF CONTENTS |  COMPRESSED DATA  |    DATA BLOCK     |
+|   (Magic+Flags)   | (File Index/TOC)  |  (Resource 1)     |   (Resource 2)    |
++-------------------+-------------------+-------------------+-------------------+
+Use code with caution.
+• The Header (Fixed Offset): Located at the very beginning (0x00). Contains unique identifying bytes, a version indicator, and the count of total files inside.
+• The Table of Contents (TOC): A master index list mapping out information for every embedded resource, specifically tracking: Filename string, Absolute File Offset, Compressed Size, and Decompressed Size.
+
+Step 2: Step-by-Step File Format Analysis
+
+
+1. Analyze the File Layout Statically (Hex View)
+
+Open the custom file inside a hex editor like ImHex or HxD.
+• Look at the first 4 bytes. If the application is called SuperGame, you might find a custom text magic sign like SGM1 (0x53474D31).
+• Scroll down to find patterns of printable ASCII text strings representing internal asset paths (e.g., textures/hero.png). Note the precise starting offset of these text clusters.
+
+2. Correlate with Binary File I/O Logic
+
+To confirm how the application reads this format, load the application's executable binary inside a decompiler (Ghidra or IDA Pro) and trace file operation APIs:
+• Look for APIs: fopen(), fread(), or Windows native ReadFile() variants.
+• Locate the initialization block right after fread(). You will typically find a structural assignment pattern:c
+fread(file_buffer, 1, 16, file_handle);
+int file_count = *(int *)(file_buffer + 4); // Extracting file count from offset 0x04
+Use code with caution.
+
+Step 3: Automating Extraction with Python (struct)
+
+Once the layout is mathematically verified, you can write a clean parser script in Python using the struct module to unpack the entire compound file structure.
+
+The Proprietary Unpacker Engine
+
+python
+import struct
+import io
+
+def unpack_custom_archive(archive_path: str):
+    """
+    Parses a proprietary container archive layout dynamically,
+    reads its inner Table of Contents, and extracts embedded files.
+    """
+    print(f"[*] Opening custom archive asset container: {archive_path}")
+    
+    with open(archive_path, "rb") as arch:
+        # 1. Read and unpack the fixed 12-Byte master header block
+        # Specification format layout: Magic String (4B), Version (4B), File Count (4B)
+        header_bytes = arch.read(12)
+        magic, version, file_count = struct.unpack("<4sII", header_bytes)
+        
+        print(f"  ├─ Magic Identifier : {magic.decode('ascii', errors='ignore')}")
+        print(f"  ├─ Format Version   : {version}")
+        print(f"  └─ Internal Files   : {file_count} entries found")
+        
+        # 2. Iterate through the Table of Contents entries to map metadata
+        # Assume each index entry layout is exactly 24 bytes long: 
+        # Filename (12B ASCII string padding), Absolute Data Offset (4B), Data Size (4B), Reserved Flags (4B)
+        file_index_entries = []
+        
+        print("\n[*] Parsing Archive Table of Contents (TOC)...")
+        for i in range(file_count):
+            entry_bytes = arch.read(24)
+            name_raw, data_offset, data_size, flags = struct.unpack("<12sIII", entry_bytes)
+            
+            clean_name = name_raw.decode('ascii').strip('\x00')
+            file_index_entries.append({
+                "name": clean_name,
+                "offset": data_offset,
+                "size": data_size
+            })
+            print(f"   ├── Found Resource: {clean_name} [Size: {data_size} Bytes at Offset: {hex(data_offset)}]")
+            
+        # 3. Resource Harvesting Layer (Carving files based on parsed index metadata)
+        print("\n[*] Executing asset extraction routine...")
+        for file_info in file_index_entries:
+            # Jump straight to the absolute physical data offset point inside the file
+            arch.seek(file_info["offset"])
+            
+            # Carve out the exact slice matching the size definition
+            raw_file_payload = arch.read(file_info["size"])
+            
+            # Log successful file parsing
+            print(f"   [EXTRACTED] Saved {file_info['name']} successfully.")
+
+# --- Local Verification Sandbox Layout Generator ---
+if __name__ == "__main__":
+    # Programmatically synthesize a sample mock proprietary file structure to validate code
+    mock_container = io.BytesIO()
+    
+    # Write Header block: Magic ("SGM1"), Version (1), File Count (2)
+    mock_container.write(struct.pack("<4sII", b"SGM1", 1, 2))
+    
+    # Write TOC Entry 1: Name ("config.txt"), Offset (60), Size (12), Flags (0)
+    mock_container.write(struct.pack("<12sIII", b"config.txt", 60, 12, 0))
+    # Write TOC Entry 2: Name ("logo.png  "), Offset (72), Size (8), Flags (0)
+    mock_container.write(struct.pack("<12sIII", b"logo.png", 72, 8, 0))
+    
+    # Padding step up to start of data payload zone (Offset 60)
+    mock_container.write(b"\x00" * 4) 
+    
+    # Write structural payload data segments directly to the calculated indices
+    mock_container.write(b"KEY=VALUE_99")  # 12 Bytes payload data starting at offset 60
+    mock_container.write(b"\x89PNG\r\n\x1a\n") # 8 Bytes payload data starting at offset 72
+    
+    with open("mock_archive.dat", "wb") as f_out:
+        f_out.write(mock_container.getvalue())
+        
+    # Execute extraction tool against our test file
+    unpack_custom_archive("mock_archive.dat")
+Use code with caution.
+
+Step 4: Declaring File Structure Views via ImHex (Pattern Language)
+
+To rapidly parse custom files visually without writing code, use the ImHex Hex Editor and write a structural pattern file template. ImHex overlays colors and names on top of the hex data in real-time.
+c
+// ImHex Custom Pattern Language Script Layout
+#include <std/mem.pat>
+
+struct TocEntry {
+    char file_name[12];
+    u32 data_offset;
+    u32 data_size;
+    u32 flags;
+};
+
+struct CustomFileArchive {
+    char magic[4];
+    u32 format_version;
+    u32 file_count;
+    
+    // Dynamically generates an array matching the parsed variable entry size
+    TocEntry entries[file_count]; 
+};
+
+// Map the compiled structural layout onto the zero starting base index of the target file
+CustomFileArchive archive @ 0x00;
+Use code with caution.
+
+Restating the Core Solution Mechanics
+
+
+✅ Custom File Format Rules
+
+Deconstructing proprietary file schemas relies on checking fixed starting offsets to map out the Magic Sign and tracking structured loops to isolate the Table of Contents (TOC) index boundary boundaries. Use Python struct parsing loops or visual editors like ImHex Pattern scripts to parse layout metadata fields and carve out nested asset blobs cleanly.
