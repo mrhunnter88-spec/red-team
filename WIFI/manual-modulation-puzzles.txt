@@ -1,1 +1,112 @@
 
+🎨 The Wi-Fi Modulation Spectrum
+
+A single standard Wi-Fi frame transitions through different modulation techniques depending on the transmission phase, signal strength, or legacy fallback constraints:
+
+Wi-Fi Phase / Standard	Primary Modulation Strategy	Bit-Mapping Mechanism
+Preamble & Header	DBPSK / DQPSK (Differential Phase Shift Keying)	Shifting the phase angle of the carrier wave sequentially to ensure all receivers sync reliably.
+Legacy 802.11b Data	CCK (Complementary Code Keying)	Complex mathematical bit-patterns map data streams into a 11-chip Barker block.
+802.11a/g/n/ac/ax Data	QDM / QAM (Quadrature Amplitude Modulation)	Modifying both the amplitude (volume) and phase (timing shift) simultaneously to create a structural data grid.
+
+
+🧠 The Puzzle Concept: Synthesizing the DBPSK Constellation
+
+In a classic radio frequency or SDR puzzle (like those found in DEF CON Wireless CTFs), you are handed a sequence of raw IQ data (In-phase and Quadrature samples representing wave coordinates) and tasked with manually decoding or injecting data using custom math.
+A Differential Binary Phase Shift Keying (DBPSK) encoder follows a simple logical state change:
+• Bit 0: Keep the exact same phase angle as the previous wave state (\(0^{\circ }\) shift).
+• Bit 1: Invert the phase angle by \(180^{\circ }\) (\(\pi \) radians shift).
+
+💻 Python Code: Algorithmic DBPSK Signal Encoder
+
+The following script functions like the internal DSP (Digital Signal Processing) core of a Software Defined Radio transmitter or advanced chipset. It manually translates a binary bit-stream (such as a Wi-Fi frame preamble snippet) into an array of phase-modulated wave coordinates.
+python
+import numpy as np
+
+def generate_dbpsk_signal(bitstream, samples_per_bit=100, frequency=5):
+    """
+    Manually modulates a digital bitstream into raw DBPSK complex waveform arrays.
+    Simulates physical Layer 1 signal generation.
+    """
+    print(f"[*] Input Bitstream Sequence: {bitstream}")
+    
+    # Time vector for a single bit segment
+    t = np.linspace(0, 1, samples_per_bit)
+    
+    # Initialize the baseline carrier phase angle (0 radians)
+    current_phase = 0.0
+    full_signal = []
+
+    for bit in bitstream:
+        # DBPSK Logic puzzle: 
+        # If the bit is 1, shift the phase angle by 180 degrees (pi radians)
+        # If the bit is 0, maintain the current phase angle state
+        if bit == 1:
+            current_phase += np.pi
+            
+        # Normalize the phase value to keep it within a 0 to 2*pi boundary
+        current_phase = current_phase % (2 * np.pi)
+        
+        # Calculate raw wave amplitude matrix over time
+        # Complex representation: I (In-phase / Cosine) and Q (Quadrature / Sine)
+        i_component = np.cos(2 * np.pi * frequency * t + current_phase)
+        q_component = np.sin(2 * np.pi * frequency * t + current_phase)
+        
+        # Merge components into a unified complex analytical waveform
+        complex_wave = i_component + 1j * q_component
+        full_signal.extend(complex_wave)
+        
+    print(f"[+] Successfully modulated {len(bitstream)} bits into {len(full_signal)} IQ samples.")
+    return np.array(full_signal)
+
+def simple_demodulate_dbpsk(iq_samples, samples_per_bit=100):
+    """
+    Reverse engineering puzzle: Analyzes phase shifts between blocks
+    to extract the hidden raw data bits.
+    """
+    recovered_bits = []
+    num_bits = len(iq_samples) // samples_per_bit
+    
+    # Tracks the reference phase angle of the preceding block
+    previous_phase = None
+    
+    for i in range(num_bits):
+        # Isolate the specific sample chunk belonging to the current bit segment
+        segment = iq_samples[i * samples_per_bit : (i + 1) * samples_per_bit]
+        
+        # Average the extracted complex vectors to compute the localized phase angle
+        avg_vector = np.mean(segment)
+        computed_phase = np.angle(avg_vector) # Returns values from -pi to +pi
+        
+        if previous_phase is not None:
+            # Measure the difference between current phase angle and the last observed angle
+            phase_delta = np.abs(computed_phase - previous_phase)
+            
+            # If the delta is close to pi (180 degrees), a phase inversion occurred (Bit 1)
+            # If it's close to 0 or 2*pi, the phase remained stable (Bit 0)
+            if np.isclose(phase_delta, np.pi, atol=0.5) or np.isclose(phase_delta, np.pi*3, atol=0.5):
+                recovered_bits.append(1)
+            else:
+                recovered_bits.append(0)
+                
+        previous_phase = computed_phase
+        
+    return recovered_bits
+
+if __name__ == "__main__":
+    # Test vector simulating a physical layer synchronization preamble
+    secret_preamble = [1, 0, 1, 1, 0, 0, 1]
+    
+    # 1. Simulate the transmitter hardware modulating bits into airwaves
+    raw_rf_wave = generate_dbpsk_signal(secret_preamble)
+    
+    # 2. Simulate receiver hardware analyzing the raw phase puzzle shifts
+    extracted_data = simple_demodulate_dbpsk(raw_rf_wave)
+    
+    print(f"[🔍 Decoded Output] Verified Extracted Bits: {extracted_data}")
+Use code with caution.
+
+🛡️ Real-World Application: The Signal Jamming & Anti-Jamming Puzzle
+
+Understanding manual modulation is essential for configuring advanced physical-layer defense mechanisms:
+1. Constellation Distortion Audits: In security labs, engineers intentionally feed distorted IQ vectors to Wi-Fi chips to analyze how they handle hardware errors. If a chip misinterprets an unexpected phase shift as a valid packet delimiter, it can trigger firmware panic states or crashes.
+2. Spread Spectrum Robustness (DSSS/OFDM): Modern Wi-Fi spreads data across multiple frequencies simultaneously. If an active jammer blocks a narrow frequency range, the modulation scheme automatically switches to simpler constellations (like moving down from 1024-QAM to QPSK) to maintain secure communication under heavy interference.
